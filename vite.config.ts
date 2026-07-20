@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       'simple-peer': path.resolve(__dirname, 'vendor/simple-peer.js'),
+      '@joverval/p2p-collab': path.resolve(__dirname, '../p2p-collab/dist/index.js'),
     },
   },
   optimizeDeps: {
