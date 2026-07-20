@@ -250,6 +250,10 @@ async function createRoom() {
     setStatus('connecting', 'waiting for peer');
     log('system', 'Share the URL above with a peer');
 
+    // Host can start working immediately
+    initEditor();
+    log('system', '📝 Editor ready');
+
     // Enable file buttons
     ($('open-file-btn') as HTMLButtonElement).disabled = false;
     ($('save-file-btn') as HTMLButtonElement).disabled = false;
@@ -293,8 +297,6 @@ async function createRoom() {
       setStatus('connected', `connected (${connectedUsers.length} peer(s))`);
       updateTopBar();
       log('system', `🎉 Peer connected!`);
-      // Initialize editor on first connection (host was working without editor)
-      if (!editorView) initEditor();
       // Send current document state to newly connected peer
       if (ydoc) {
         const state = Y.encodeStateAsUpdate(ydoc);
