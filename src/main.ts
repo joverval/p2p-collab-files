@@ -2,6 +2,18 @@ import { P2PRoom } from '@joverval/p2p-collab';
 import type { Room } from '@joverval/p2p-collab';
 import './style.css';
 
+// Quick sanity check
+console.log('P2PRoom loaded:', typeof P2PRoom, P2PRoom?.name);
+
+// Test: can we create a room at all?
+try {
+  const testRoom = new P2PRoom(true, window.location.href.split('#')[0]);
+  console.log('Test room created:', testRoom.isHost);
+  testRoom.offerUrl().then((url: string) => console.log('Test offer URL:', url.substring(0, 50) + '...')).catch((e: any) => console.error('Test offer failed:', e));
+} catch (e) {
+  console.error('Test room creation failed:', e);
+}
+
 import * as Y from 'yjs';
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
