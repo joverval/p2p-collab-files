@@ -291,7 +291,7 @@ async function createRoom() {
       }
     });
 
-    r.onPeerJoin((peerId: string) => {
+    r.onPeerJoin(async (peerId: string) => {
       connected = true;
       connectedUsers.push('Peer');
       setStatus('connected', `connected (${connectedUsers.length} peer(s))`);
@@ -302,6 +302,17 @@ async function createRoom() {
         const state = Y.encodeStateAsUpdate(ydoc);
         room!.send(encodeYjs(state));
         log('system', `Sent initial state (${state.length} bytes)`);
+      }
+      // Generate new invite link for next peer
+      try {
+        const newUrl = await r.offerUrl();
+        const newSdpB64 = newUrl.match(/#sdp=(.*)/)?.[1] || '';
+        const newShareUrl = `${baseUrl}#room=${roomId}&sdp=${encodeURIComponent(newSdpB64)}`;
+        $('share-url').textContent = newShareUrl;
+        $('share-url-size').textContent = `URL segment: ${(newSdpB64.length / 1024).toFixed(1)} KB`;
+        log('system', 'New invite link ready for next peer');
+      } catch (err: any) {
+        log('system', `ERROR generating new offer: ${err.message}`);
       }
     });
 
