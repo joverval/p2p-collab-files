@@ -1,10 +1,10 @@
 // p2p-collab WebSocket relay for automatic SDP handshake
-// Supports: host registration, peer join requests with email, host approve/reject
+// Supports: host registration, peer join requests with email+offerId, host approve/reject
 
 import { WebSocketServer } from 'ws';
 
 const PORT = 8083;
-const rooms = new Map(); // roomId → { hostWs, pending: Map<peerWs, { email, answerB64 }> }
+const rooms = new Map(); // roomId → { hostWs, pending: Map<peerWs, { email, offerId, answerB64 }> }
 
 const wss = new WebSocketServer({ port: PORT });
 
@@ -39,16 +39,16 @@ wss.on('connection', (ws) => {
           return;
         }
 
-        // Store pending request
         room.pending.set(ws, {
           email: msg.email || 'unknown',
+          offerId: msg.offerId || '',
           answerB64: msg.answerB64,
         });
 
-        // Notify host of pending request
         room.hostWs.send(JSON.stringify({
           type: 'peer-request',
           email: msg.email || 'unknown',
+          offerId: msg.offerId || '',
         }));
 
         ws.send(JSON.stringify({ type: 'waiting-approval' }));
@@ -59,19 +59,16 @@ wss.on('connection', (ws) => {
         const room = rooms.get(roomId);
         if (!room) return;
 
-        // Find the pending peer (approve the first one, or match by email)
         for (const [peerWs, pending] of room.pending) {
-          if (pending.email === msg.email || true) { // approve first pending
-            // Send answer to host
+          if (pending.email === msg.email || true) {
             room.hostWs.send(JSON.stringify({
               type: 'answer',
+              offerId: pending.offerId,
               answerB64: pending.answerB64,
               email: pending.email,
             }));
 
-            // Notify peer
             peerWs.send(JSON.stringify({ type: 'approved' }));
-
             room.pending.delete(peerWs);
             break;
           }
@@ -87,7 +84,6 @@ wss.on('connection', (ws) => {
           if (pending.email === msg.email || true) {
             peerWs.send(JSON.stringify({ type: 'rejected', message: 'Host rejected your request' }));
             room.pending.delete(peerWs);
-            // Close peer connection
             peerWs.close();
             break;
           }
@@ -99,7 +95,6 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     if (role === 'host' && roomId) {
-      // Reject all pending peers
       const room = rooms.get(roomId);
       if (room) {
         for (const [peerWs] of room.pending) {

@@ -113,7 +113,7 @@ function updateTopBar() {
 
 // ── Pending Requests ──
 
-function addPendingRequest(email: string) {
+function addPendingRequest(email: string, offerId: string) {
   try {
     $('pending-section').style.display = 'block';
     const list = $('pending-list');
@@ -130,7 +130,7 @@ function addPendingRequest(email: string) {
 
     approveBtn.addEventListener('click', () => {
       if (!ws) { log('system', 'ERROR: WS disconnected'); return; }
-      ws.send(JSON.stringify({ type: 'host-approve', email }));
+      ws.send(JSON.stringify({ type: 'host-approve', email, offerId }));
       item.remove();
       if ($('pending-list').children.length === 0) {
         $('pending-section').style.display = 'none';
@@ -236,11 +236,11 @@ async function createRoom() {
 
         // Use P2PRoom directly (createRoom wrapper is broken by Vite module transform)
         const r = new P2PRoom(true, baseUrl);
-        const url = await r.offerUrl();
+        const { url, offerId } = await r.offerUrl();
         room = r;
 
     const sdpB64 = url.match(/#sdp=(.*)/)?.[1] || '';
-    const shareUrl = `${baseUrl}#room=${roomId}&sdp=${encodeURIComponent(sdpB64)}`;
+    const shareUrl = `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
 
     $('share-url').textContent = shareUrl;
     $('share-url').classList.remove('empty');
@@ -263,10 +263,10 @@ async function createRoom() {
       const msg = JSON.parse(e.data);
       if (msg.type === 'peer-request') {
         log('system', `📩 ${msg.email} wants to join`);
-        addPendingRequest(msg.email);
+        addPendingRequest(msg.email, msg.offerId || '');
       } else if (msg.type === 'answer') {
         log('system', `✅ ${msg.email || 'Peer'} approved — applying answer...`);
-        room!.acceptAnswer(`#sdp=${msg.answerB64}`);
+        room!.acceptAnswer(msg.offerId || '', `#sdp=${msg.answerB64}`);
         log('system', 'Answer applied, waiting for connection...');
       }
     };
@@ -305,9 +305,9 @@ async function createRoom() {
       }
       // Generate new invite link for next peer
       try {
-        const newUrl = await r.offerUrl();
+        const { url: newUrl, offerId: newOfferId } = await r.offerUrl();
         const newSdpB64 = newUrl.match(/#sdp=(.*)/)?.[1] || '';
-        const newShareUrl = `${baseUrl}#room=${roomId}&sdp=${encodeURIComponent(newSdpB64)}`;
+        const newShareUrl = `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`;
         $('share-url').textContent = newShareUrl;
         $('share-url-size').textContent = `URL segment: ${(newSdpB64.length / 1024).toFixed(1)} KB`;
         log('system', 'New invite link ready for next peer');
@@ -328,15 +328,15 @@ let _pendingEmail = '';
 
 // ── PEER ──
 
-function parseRoomFromUrl(): { roomId: string; offer: string } | null {
+function parseRoomFromUrl(): { roomId: string; offerId: string; offer: string } | null {
   const hash = window.location.hash;
   if (!hash) return null;
-  const m = hash.match(/^#room=([^&]+)&sdp=(.+)$/);
+  const m = hash.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/);
   if (!m) return null;
-  return { roomId: m[1], offer: decodeURIComponent(m[2]) };
+  return { roomId: m[1], offerId: m[2], offer: decodeURIComponent(m[3]) };
 }
 
-async function peerAutoJoin(roomId: string, offerB64: string) {
+async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
   const btn = $('create-room-btn') as HTMLButtonElement;
   if (btn.disabled) return;
   btn.disabled = true;
@@ -369,6 +369,7 @@ async function peerAutoJoin(roomId: string, offerB64: string) {
     ws!.send(JSON.stringify({
       type: 'peer-join-request',
       room: roomId,
+      offerId,
       email,
       answerB64,
     }));
@@ -500,7 +501,7 @@ if (!(window as any).__p2pBound) {
       ($('create-room-btn') as HTMLButtonElement).cloneNode(true)
     );
     ($('create-room-btn') as HTMLButtonElement).addEventListener('click', () => {
-      peerAutoJoin(parsed.roomId, parsed.offer);
+      peerAutoJoin(parsed.roomId, parsed.offerId, parsed.offer);
     });
     ($('share-section') as HTMLElement).style.display = 'none';
   }
