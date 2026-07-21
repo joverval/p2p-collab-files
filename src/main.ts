@@ -92,7 +92,7 @@ let myEmail = '';
 let isHost = false;
 let room: Room | null = null;
 let connected = false;
-let connectedUsers: string[] = [];
+let allUsers: { email: string; isHost: boolean }[] = [];
 const peerEmails: Map<string, string> = new Map(); // peerId → email
 let _pendingPeerEmail = ''; // email of peer currently connecting
 const baseUrl = window.location.href.split('#')[0];
@@ -111,16 +111,21 @@ let fileHandle: FileSystemFileHandle | null = null;
 function updateTopBar() {
   $('topbar').style.display = 'flex';
   $('topbar-filename').textContent = fileHandle ? `📄 ${fileHandle.name}` : '📄 Untitled.md';
-  $('user-count').textContent = String(connectedUsers.length);
-  // Build dropdown
+  $('user-count').textContent = String(allUsers.length);
   const dd = $('user-dropdown');
   dd.innerHTML = '';
-  if (isHost) {
-    dd.appendChild(el('div', { class: 'user-dropdown-item host' }, [`[Host] ${myEmail}`]));
+  for (const u of allUsers) {
+    dd.appendChild(el('div', {
+      class: 'user-dropdown-item' + (u.isHost ? ' host' : ''),
+    }, [u.isHost ? `[Host] ${u.email}` : u.email]));
   }
-  for (const u of connectedUsers) {
-    dd.appendChild(el('div', { class: 'user-dropdown-item' }, [u]));
-  }
+}
+
+// Broadcast user list to all peers
+function broadcastUserList() {
+  if (!isHost || !room || !connected) return;
+  const list = JSON.stringify({ type: 'users', users: allUsers });
+  room.send(encodeChat(`[USERS]${list}`));
 }
 
 // ── User dropdown toggle ──
@@ -261,6 +266,7 @@ async function createRoom() {
   }
   myEmail = email;
   isHost = true;
+  allUsers = [{ email: myEmail, isHost: true }];
   ($('email-input') as HTMLInputElement).disabled = true;
 
   log('system', 'Creating room...');
@@ -390,10 +396,11 @@ async function createRoom() {
       connected = true;
       const peerEmail = _pendingPeerEmail || peerId;
       peerEmails.set(peerId, peerEmail);
-      connectedUsers.push(peerEmail);
+      allUsers.push({ email: peerEmail, isHost: false });
       _pendingPeerEmail = '';
-      setStatus('connected', `connected (${connectedUsers.length} peer(s))`);
+      setStatus('connected', `connected (${allUsers.length} peer(s))`);
       updateTopBar();
+      broadcastUserList();
       log('system', `🎉 ${peerEmail} connected!`);
       // Send current document state to newly connected peer
       if (ydoc) {
@@ -512,7 +519,7 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
         if (msg.type === 'approved') {
         setStatus('connected', 'connected');
         connected = true;
-        connectedUsers.push('[Host]');
+        allUsers.push({ email: 'Host', isHost: true });
         updateTopBar();
         // Peer: hide open button, enable save
         ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
@@ -537,7 +544,7 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
       };
       setStatus('connected', 'connected — waiting for host to apply answer');
       connected = true;
-      connectedUsers.push('[Host]');
+      allUsers.push({ email: 'Host', isHost: true });
       updateTopBar();
       ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
       ($('save-file-btn') as HTMLButtonElement).disabled = false;
@@ -561,7 +568,18 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
           isRemoteUpdate = false;
         }
       } else {
-        log('received', decoded.text);
+        // Check for user list broadcast
+        if (decoded.text.startsWith('[USERS]')) {
+          try {
+            const data = JSON.parse(decoded.text.slice(7));
+            if (data.type === 'users') {
+              allUsers = data.users;
+              updateTopBar();
+            }
+          } catch {}
+        } else {
+          log('received', decoded.text);
+        }
       }
     });
 
