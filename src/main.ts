@@ -445,7 +445,7 @@ function sendChat() {
   const prefix = isHost ? `[Host] ${myEmail}` : myEmail;
   const fullText = `${prefix}: ${text}`;
   room.send(encodeChat(fullText));
-  log('sent', `Me: ${text}`);
+  log('sent', isHost ? `[Host]: ${text}` : text);
   input.value = '';
 }
 
