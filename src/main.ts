@@ -364,7 +364,9 @@ async function createRoom() {
       try {
         const { url: newUrl, offerId: newOfferId } = await r.offerUrl();
         const newSdpB64 = newUrl.match(/#sdp=(.*)/)?.[1] || '';
-        const newShareUrl = `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`;
+        const newShareUrl = useRelay
+          ? `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`
+          : `${baseUrl}#offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`;
         $('share-url').textContent = newShareUrl;
         $('share-url-size').textContent = `URL segment: ${(newSdpB64.length / 1024).toFixed(1)} KB`;
         log('system', 'New invite link ready for next peer');
