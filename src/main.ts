@@ -271,7 +271,7 @@ async function createRoom() {
       }
     };
 
-    // Set up room message handling
+    // Set up room message handling — host broadcasts everything to all peers
     r.onMessage((data: string | Uint8Array, peerId: string) => {
       if (!(data instanceof Uint8Array)) return;
       const decoded = decodeMessage(data);
@@ -279,15 +279,19 @@ async function createRoom() {
         if (ydoc) {
           isRemoteUpdate = true;
           Y.applyUpdate(ydoc, decoded.update);
+          isRemoteUpdate = false;
           if (editorView) {
             editorView.dispatch({
               changes: { from: 0, to: editorView.state.doc.length, insert: ytext!.toString() },
             });
           }
-          isRemoteUpdate = false;
         }
+        // Forward to all peers (Yjs handles duplicates gracefully)
+        room!.send(data);
       } else {
         log('received', `${peerId}: ${decoded.text}`);
+        // Broadcast chat to all peers
+        room!.send(data);
       }
     });
 
