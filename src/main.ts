@@ -331,10 +331,15 @@ async function createRoom() {
     const d=decodeMessage(data);
     if(d.type==='yjs'){
       if(ydoc){
-        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
-        if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+        isRemoteUpdate=true;
+        Y.applyUpdate(ydoc,d.update);
+        const newText = ytext!.toString();
+        if(editorView && editorView.state.doc.toString() !== newText) {
+          editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
+        }
         isRemoteUpdate=false;
       }
+      // Forward to other peers (not back to sender)
       room!.send(data);
     } else {
       const sender = peerEmails.get(peerId)||peerId;
@@ -432,7 +437,10 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     if(d.type==='yjs'){
       if(ydoc){
         isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
-        if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+        const newText = ytext!.toString();
+        if(editorView && editorView.state.doc.toString() !== newText) {
+          editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
+        }
         isRemoteUpdate=false;
       }
     } else {
