@@ -121,12 +121,27 @@ function updateNotif() {
 
 // ── Message encoding ──
 function encodeChat(text: string): Uint8Array { const e=new TextEncoder().encode(text); const m=new Uint8Array(1+e.length); m[0]=0x00; m.set(e,1); return m; }
-function encodeYjs(data: Uint8Array): Uint8Array { const m=new Uint8Array(1+data.length); m[0]=0x01; m.set(data,1); return m; }
-function decodeMessage(data: Uint8Array): {type:'chat',text:string}|{type:'yjs',update:Uint8Array} {
+function encodeYjs(data: Uint8Array, seq?: number): Uint8Array {
+  if(seq===undefined) return encodeYjs(data,0);
+  const m=new Uint8Array(3+data.length); m[0]=0x01; m[1]=(seq>>8)&0xFF; m[2]=seq&0xFF; m.set(data,3); return m;
+}
+function decodeMessage(data: Uint8Array): {type:'chat',text:string}|{type:'yjs',update:Uint8Array,seq:number} {
   if(data.length===0) return {type:'chat',text:''};
-  if(data[0]===0x01) return {type:'yjs',update:data.slice(1)};
+  if(data[0]===0x01) return {type:'yjs',update:data.slice(3),seq:(data[1]<<8)|data[2]};
   const s=data[0]===0x00?1:0;
   return {type:'chat',text:new TextDecoder().decode(data.slice(s))};
+}
+
+// ── Sequence + Checksum ──
+let _hostSeq = 0;
+let _peerSeq = 0;
+let _updateCount = 0;
+const CHECKSUM_INTERVAL = 10;
+async function getChecksum(): Promise<string> {
+  const text = ytext?.toString() || '';
+  const enc = new TextEncoder().encode(text);
+  const hash = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(hash)).map(b=>b.toString(16).padStart(2,'0')).join('');
 }
 
 // ── Email ──
@@ -221,7 +236,18 @@ function initEditor() {
   });
   ydoc.on('update',(update:Uint8Array)=>{
     if(isRemoteUpdate) return;
-    if(room && connected) room.send(encodeYjs(update));
+    if(room && connected) {
+      _hostSeq++;
+      _updateCount++;
+      room.send(encodeYjs(update, _hostSeq));
+      // Send checksum every CHECKSUM_INTERVAL updates
+      if(_updateCount >= CHECKSUM_INTERVAL) {
+        _updateCount = 0;
+        getChecksum().then(hash => {
+          if(room && connected) room.send(encodeChat(`[CHKSUM]${_hostSeq}:${hash}`));
+        });
+      }
+    }
   });
 }
 
@@ -371,7 +397,7 @@ async function createRoom() {
         updateTopBar(); broadcastUserList();
       } else if(d.text.startsWith('[SYNC]')){
         if(ydoc){
-          room!.send(encodeYjs(Y.encodeStateAsUpdate(ydoc)));
+          room!.send(encodeYjs(Y.encodeStateAsUpdate(ydoc), _hostSeq));
         }
       } else if(d.text.startsWith('[FILENAME]')){
         ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
@@ -391,7 +417,7 @@ async function createRoom() {
     _pendingPeerEmail = '';
     updateTopBar(); broadcastUserList();
     addChatLog('system',`🎉 ${peerEmail} connected`);
-    if(ydoc){ const s=Y.encodeStateAsUpdate(ydoc); room!.send(encodeYjs(s)); }
+    if(ydoc){ const s=Y.encodeStateAsUpdate(ydoc); room!.send(encodeYjs(s, _hostSeq)); }
     // Generate new offer for next peer
     try {
       const {url:nu,offerId:noi}=await r.offerUrl();
@@ -476,6 +502,14 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
         _emailSent = true;
         room!.send(encodeChat(`[EMAIL]${myEmail}`));
       }
+      // Sequence validation
+      const expectedSeq = _peerSeq + 1;
+      if(d.seq !== 0 && d.seq !== expectedSeq) {
+        // Out of sync — highlight sync button
+        ($('sync-btn') as HTMLButtonElement).style.background = '#da3633';
+        ($('sync-btn') as HTMLButtonElement).style.color = '#fff';
+      }
+      _peerSeq = d.seq || _peerSeq;
       if(ydoc){
         isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
         const newText = ytext!.toString();
@@ -489,6 +523,21 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
         try { const ud=JSON.parse(d.text.slice(7)); if(ud.type==='users'){ allUsers=ud.users; updateTopBar(); } } catch {}
       } else if(d.text.startsWith('[FILENAME]')){
         ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
+      } else if(d.text.startsWith('[CHKSUM]')){
+        const [seqStr, hash] = d.text.slice(8).split(':');
+        if(parseInt(seqStr) !== _peerSeq) {
+          // Seq mismatch — highlight sync
+          ($('sync-btn') as HTMLButtonElement).style.background = '#da3633';
+          ($('sync-btn') as HTMLButtonElement).style.color = '#fff';
+        }
+        // Verify checksum
+        getChecksum().then(localHash => {
+          if(localHash !== hash) {
+            // Checksum mismatch — auto-sync
+            addChatLog('system','⚠️ Checksum mismatch — auto-syncing...');
+            room!.send(encodeChat('[SYNC]'));
+          }
+        });
       } else addChatLog('received',d.text);
     }
   });
