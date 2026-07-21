@@ -441,6 +441,7 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
 }
 
 // ── Bindings ──
+document.addEventListener('DOMContentLoaded', () => {
 if(!(window as any).__p2pBound){
   (window as any).__p2pBound = true;
   ($('create-room-btn') as HTMLButtonElement).addEventListener('click', createRoom);
@@ -452,4 +453,4 @@ if(!(window as any).__p2pBound){
     ($('create-room-btn') as HTMLButtonElement).addEventListener('click',()=>peerAutoJoin(parsed.roomId,parsed.offerId,parsed.offer));
     ($('handshake-bar') as HTMLElement).style.display = 'flex';
   }
-}
+}});
