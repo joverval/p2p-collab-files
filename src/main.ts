@@ -249,7 +249,9 @@ async function createRoom() {
     log('system', 'Generating WebRTC offer...');
 
         // Use P2PRoom directly (createRoom wrapper is broken by Vite module transform)
-        const r = new P2PRoom(true, baseUrl);
+        const r = new P2PRoom(true, baseUrl, {
+          onError: (err: Error) => log('system', `ERROR: ${err.message}`),
+        });
         const { url, offerId } = await r.offerUrl();
         room = r;
 
@@ -301,16 +303,17 @@ async function createRoom() {
     } else {
       // Manual mode: show answer input for host to paste peer's answer
       $('manual-answer-section').style.display = 'block';
-      ($('manual-answer-btn') as HTMLButtonElement).addEventListener('click', () => {
-        const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
-        if (!raw || !room) return;
-        // Parse answer URL: #sdp=<base64>
-        const match = raw.match(/#sdp=(.*)/);
-        const answerB64 = match ? match[1] : raw;
-        room.acceptAnswer(offerId, `#sdp=${answerB64}`);
-        log('system', 'Manual answer applied, waiting for connection...');
-        $('manual-answer-section').style.display = 'none';
-      });
+      $('manual-answer-section').style.display = 'block';
+            ($('manual-answer-btn') as HTMLButtonElement).addEventListener('click', () => {
+              const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
+              if (!raw || !room) return;
+              const match = raw.match(/#sdp=(.*)/);
+              const answerB64 = match ? match[1] : raw;
+              log('system', `Applying answer for offer ${offerId}...`);
+              room.acceptAnswer(offerId, `#sdp=${answerB64}`);
+              log('system', 'Manual answer applied, waiting for connection...');
+              $('manual-answer-section').style.display = 'none';
+            });
     }
 
     // Set up room message handling — host broadcasts everything to all peers
@@ -424,7 +427,9 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
     }
 
     // Join room (use P2PRoom directly — joinRoom wrapper broken by Vite)
-    const peer = new P2PRoom(false, baseUrl);
+    const peer = new P2PRoom(false, baseUrl, {
+      onError: (err: Error) => log('system', `ERROR: ${err.message}`),
+    });
     const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
     room = peer;
 
