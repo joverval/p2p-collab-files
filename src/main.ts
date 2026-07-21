@@ -401,6 +401,9 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
         connected = true;
         connectedUsers.push('[Host]');
         updateTopBar();
+        // Peer: hide open button, enable save
+        ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
+        ($('save-file-btn') as HTMLButtonElement).disabled = false;
         initEditor();
       } else if (msg.type === 'rejected') {
         setStatus('error', 'rejected');
@@ -451,8 +454,9 @@ function sendChat() {
 
 // ── File System Access ──
 
+// Open file — host only
 ($('open-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
-  if (!isHost) return;
+  if (!isHost || !ydoc) return;
   try {
     const [handle] = await window.showOpenFilePicker({
       types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
@@ -466,33 +470,41 @@ function sendChat() {
       });
     }
     updateTopBar();
-    log('system', `Opened: ${handle.name}`);
+    log('system', `📂 Opened: ${handle.name}`);
   } catch (err: any) {
     if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
   }
 });
 
+// Save — available for everyone
 ($('save-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
-  if (!isHost) return;
-  if (!fileHandle) {
+  if (!ytext) return;
+  const content = ytext.toString();
+  if (isHost && fileHandle) {
+    // Host: save to already-opened file
     try {
-      fileHandle = await window.showSaveFilePicker({
-        suggestedName: 'document.md',
+      const w = await fileHandle.createWritable();
+      await w.write(content);
+      await w.close();
+      log('system', `💾 Saved: ${fileHandle.name}`);
+    } catch (err: any) {
+      log('system', `ERROR saving: ${err.message}`);
+    }
+  } else {
+    // Peer or host without file: save-as dialog
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: fileHandle?.name || 'document.md',
         types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
       });
-      updateTopBar();
+      const w = await handle.createWritable();
+      await w.write(content);
+      await w.close();
+      if (isHost) { fileHandle = handle; updateTopBar(); }
+      log('system', `💾 Saved as: ${handle.name}`);
     } catch (err: any) {
       if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
-      return;
     }
-  }
-  try {
-    const w = await fileHandle.createWritable();
-    await w.write(ytext!.toString());
-    await w.close();
-    log('system', `Saved: ${fileHandle.name}`);
-  } catch (err: any) {
-    log('system', `ERROR saving: ${err.message}`);
   }
 });
 
