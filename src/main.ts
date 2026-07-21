@@ -308,7 +308,7 @@ async function createRoom() {
               const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
               if (!raw || !room) return;
               const match = raw.match(/#sdp=(.*)/);
-              const answerB64 = match ? match[1] : raw;
+              const answerB64 = match ? decodeURIComponent(match[1]) : raw;
               log('system', `Applying answer for offer ${offerId}...`);
               room.acceptAnswer(offerId, `#sdp=${answerB64}`);
               log('system', 'Manual answer applied, waiting for connection...');
