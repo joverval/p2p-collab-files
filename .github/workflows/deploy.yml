@@ -1,0 +1,45 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: p2p-collab
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: cd p2p-collab && npm ci && npm run build
+
+      - run: cd app && npm ci && npm run build
+
+      - uses: actions/configure-pages@v4
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/dist
+
+      - uses: actions/deploy-pages@v4
+        id: deployment

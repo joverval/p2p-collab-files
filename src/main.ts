@@ -382,9 +382,13 @@ let _pendingEmail = '';
 function parseRoomFromUrl(): { roomId: string; offerId: string; offer: string } | null {
   const hash = window.location.hash;
   if (!hash) return null;
-  const m = hash.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/);
-  if (!m) return null;
-  return { roomId: m[1], offerId: m[2], offer: decodeURIComponent(m[3]) };
+  // Relay mode: #room=<id>&offer=<id>&sdp=<b64>
+  const m1 = hash.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/);
+  if (m1) return { roomId: m1[1], offerId: m1[2], offer: decodeURIComponent(m1[3]) };
+  // Manual mode: #offer=<id>&sdp=<b64>
+  const m2 = hash.match(/^#offer=([^&]+)&sdp=(.+)$/);
+  if (m2) return { roomId: '', offerId: m2[1], offer: decodeURIComponent(m2[2]) };
+  return null;
 }
 
 async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
@@ -401,11 +405,23 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
   ($('email-input') as HTMLInputElement).disabled = true;
   ($('create-room-btn') as HTMLButtonElement).disabled = true;
 
-  log('system', `Joining room ${roomId} as ${email}...`);
-  setStatus('connecting', 'connecting to relay');
+  log('system', `Joining room ${roomId || '(manual)'} as ${email}...`);
+  setStatus('connecting', roomId ? 'connecting to relay' : 'connecting (manual)');
 
   try {
-    await wsConnect();
+    // Try WS relay if available
+    let useRelay = false;
+    if (roomId) {
+      try {
+        await Promise.race([
+          wsConnect(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+        ]);
+        useRelay = true;
+      } catch {
+        log('system', '⚠️ Relay unavailable — using manual mode');
+      }
+    }
 
     // Join room (use P2PRoom directly — joinRoom wrapper broken by Vite)
     const peer = new P2PRoom(false, baseUrl);
@@ -416,25 +432,22 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
     const answerB64 = match ? match[1] : '';
     if (!answerB64) throw new Error('Could not extract answer');
 
-    // Send join request with email
-    ws!.send(JSON.stringify({
-      type: 'peer-join-request',
-      room: roomId,
-      offerId,
-      email,
-      answerB64,
-    }));
+    if (useRelay) {
+      // Send join request via WS relay
+      ws!.send(JSON.stringify({
+        type: 'peer-join-request',
+        room: roomId,
+        offerId,
+        email,
+        answerB64,
+      }));
 
-    log('system', 'Join request sent — waiting for host approval...');
-    setStatus('connecting', 'awaiting approval');
+      log('system', 'Join request sent — waiting for host approval...');
+      setStatus('connecting', 'awaiting approval');
 
-    // Wait for approval/rejection
-    ws!.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'waiting-approval') {
-        // already handled in status
-      } else if (msg.type === 'approved') {
-        log('system', '✅ Approved by host!');
+      ws!.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'approved') {
         setStatus('connected', 'connected');
         connected = true;
         connectedUsers.push('[Host]');
@@ -448,6 +461,27 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
         log('system', `❌ Rejected: ${msg.message}`);
       }
     };
+    } else {
+      // Manual mode: show answer URL for peer to copy and share with host
+      const answerFullUrl = `${baseUrl}#sdp=${encodeURIComponent(answerB64)}`;
+      $('share-url').textContent = answerFullUrl;
+      $('share-url').classList.remove('empty');
+      $('share-url-size').textContent = `Answer URL — copy and send to host`;
+      $('share-section').style.display = 'block';
+      $('share-url').onclick = () => {
+        navigator.clipboard.writeText(answerFullUrl).then(() => {
+          log('system', '📋 Answer URL copied — send to host');
+        }).catch(() => {});
+      };
+      setStatus('connected', 'connected — waiting for host to apply answer');
+      connected = true;
+      connectedUsers.push('[Host]');
+      updateTopBar();
+      ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
+      ($('save-file-btn') as HTMLButtonElement).disabled = false;
+      initEditor();
+      log('system', '📋 Copy the Answer URL above and send it to the host');
+    }
 
     // Room message handling
     room!.onMessage((data: string | Uint8Array, peerId: string) => {
