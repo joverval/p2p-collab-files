@@ -90,6 +90,8 @@ let isHost = false;
 let room: Room | null = null;
 let connected = false;
 let connectedUsers: string[] = [];
+const peerEmails: Map<string, string> = new Map(); // peerId → email
+let _pendingPeerEmail = ''; // email of peer currently connecting
 const baseUrl = window.location.href.split('#')[0];
 
 // Yjs
@@ -106,8 +108,9 @@ let fileHandle: FileSystemFileHandle | null = null;
 function updateTopBar() {
   $('topbar').style.display = 'flex';
   $('topbar-filename').textContent = fileHandle ? `📄 ${fileHandle.name}` : '📄 Untitled.md';
-  $('topbar-users').textContent = connectedUsers.length
-    ? `👤 ${connectedUsers.join(', ')}`
+  const users = isHost ? [`[Host] ${myEmail}`, ...connectedUsers] : connectedUsers;
+  $('topbar-users').textContent = users.length
+    ? `👤 ${users.join(', ')}`
     : '👤 No users connected';
 }
 
@@ -266,6 +269,7 @@ async function createRoom() {
         addPendingRequest(msg.email, msg.offerId || '');
       } else if (msg.type === 'answer') {
         log('system', `✅ ${msg.email || 'Peer'} approved — applying answer...`);
+        _pendingPeerEmail = msg.email || '';
         room!.acceptAnswer(msg.offerId || '', `#sdp=${msg.answerB64}`);
         log('system', 'Answer applied, waiting for connection...');
       }
@@ -289,18 +293,23 @@ async function createRoom() {
         // Forward to all peers (Yjs handles duplicates gracefully)
         room!.send(data);
       } else {
-        log('received', `${peerId}: ${decoded.text}`);
-        // Broadcast chat to all peers
-        room!.send(data);
+        const senderEmail = peerEmails.get(peerId) || peerId;
+        log('received', `${senderEmail}: ${decoded.text}`);
+        // Relay to all peers with sender email prefix
+        const relayText = encodeChat(`${senderEmail}: ${decoded.text}`);
+        room!.send(relayText);
       }
     });
 
     r.onPeerJoin(async (peerId: string) => {
       connected = true;
-      connectedUsers.push('Peer');
+      const peerEmail = _pendingPeerEmail || peerId;
+      peerEmails.set(peerId, peerEmail);
+      connectedUsers.push(peerEmail);
+      _pendingPeerEmail = '';
       setStatus('connected', `connected (${connectedUsers.length} peer(s))`);
       updateTopBar();
-      log('system', `🎉 Peer connected!`);
+      log('system', `🎉 ${peerEmail} connected!`);
       // Send current document state to newly connected peer
       if (ydoc) {
         const state = Y.encodeStateAsUpdate(ydoc);
@@ -390,7 +399,7 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
         log('system', '✅ Approved by host!');
         setStatus('connected', 'connected');
         connected = true;
-        connectedUsers.push('host');
+        connectedUsers.push('[Host]');
         updateTopBar();
         initEditor();
       } else if (msg.type === 'rejected') {
@@ -415,7 +424,7 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
           isRemoteUpdate = false;
         }
       } else {
-        log('received', `Host: ${decoded.text}`);
+        log('received', decoded.text);
       }
     });
 
@@ -433,7 +442,9 @@ function sendChat() {
   const input = $('chat-input') as HTMLInputElement;
   const text = input.value.trim();
   if (!text || !room || !connected) return;
-  room.send(encodeChat(text));
+  const prefix = isHost ? `[Host] ${myEmail}` : myEmail;
+  const fullText = `${prefix}: ${text}`;
+  room.send(encodeChat(fullText));
   log('sent', `Me: ${text}`);
   input.value = '';
 }
