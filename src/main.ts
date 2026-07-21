@@ -221,18 +221,29 @@ async function createRoom() {
   setStatus('connecting', 'connecting to relay');
 
   try {
-    await wsConnect();
+    // Try WS relay — fall back to manual if unavailable
+    let useRelay = false;
+    try {
+      await Promise.race([
+        wsConnect(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
+      ]);
+      useRelay = true;
+    } catch {
+      log('system', '⚠️ Relay unavailable — using manual copy-paste mode');
+    }
 
-    // Register as host
-    const roomId = await new Promise<string>((resolve) => {
-      ws!.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'registered') resolve(msg.room);
-      };
-      ws!.send(JSON.stringify({ type: 'host-register' }));
-    });
-
-    log('system', `Room registered: ${roomId}`);
+    let roomId = '';
+    if (useRelay) {
+      roomId = await new Promise<string>((resolve) => {
+        ws!.onmessage = (e) => {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'registered') resolve(msg.room);
+        };
+        ws!.send(JSON.stringify({ type: 'host-register' }));
+      });
+      log('system', `Room registered: ${roomId}`);
+    }
 
     // Create WebRTC offer
     log('system', 'Generating WebRTC offer...');
@@ -243,14 +254,16 @@ async function createRoom() {
         room = r;
 
     const sdpB64 = url.match(/#sdp=(.*)/)?.[1] || '';
-    const shareUrl = `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
+    const shareUrl = useRelay
+      ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`
+      : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
 
     $('share-url').textContent = shareUrl;
     $('share-url').classList.remove('empty');
     $('share-url-size').textContent = `URL segment: ${(sdpB64.length / 1024).toFixed(1)} KB`;
     $('share-section').style.display = 'block';
 
-    // Click to copy — read current URL from element
+    // Click to copy
     $('share-url').onclick = () => {
       const url = $('share-url').textContent || '';
       navigator.clipboard.writeText(url).then(() => {
@@ -271,19 +284,34 @@ async function createRoom() {
     ($('open-file-btn') as HTMLButtonElement).disabled = false;
     ($('save-file-btn') as HTMLButtonElement).disabled = false;
 
-    // Handle WS messages (pending requests)
-    ws!.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === 'peer-request') {
-        log('system', `📩 ${msg.email} wants to join`);
-        addPendingRequest(msg.email, msg.offerId || '');
-      } else if (msg.type === 'answer') {
-        log('system', `✅ ${msg.email || 'Peer'} approved — applying answer...`);
-        _pendingPeerEmail = msg.email || '';
-        room!.acceptAnswer(msg.offerId || '', `#sdp=${msg.answerB64}`);
-        log('system', 'Answer applied, waiting for connection...');
-      }
-    };
+    if (useRelay) {
+      // WS relay mode: handle pending requests and answer forwarding
+      ws!.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'peer-request') {
+          log('system', `📩 ${msg.email} wants to join`);
+          addPendingRequest(msg.email, msg.offerId || '');
+        } else if (msg.type === 'answer') {
+          log('system', `✅ ${msg.email || 'Peer'} approved — applying answer...`);
+          _pendingPeerEmail = msg.email || '';
+          room!.acceptAnswer(msg.offerId || '', `#sdp=${msg.answerB64}`);
+          log('system', 'Answer applied, waiting for connection...');
+        }
+      };
+    } else {
+      // Manual mode: show answer input for host to paste peer's answer
+      $('manual-answer-section').style.display = 'block';
+      ($('manual-answer-btn') as HTMLButtonElement).addEventListener('click', () => {
+        const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
+        if (!raw || !room) return;
+        // Parse answer URL: #sdp=<base64>
+        const match = raw.match(/#sdp=(.*)/);
+        const answerB64 = match ? match[1] : raw;
+        room.acceptAnswer(offerId, `#sdp=${answerB64}`);
+        log('system', 'Manual answer applied, waiting for connection...');
+        $('manual-answer-section').style.display = 'none';
+      });
+    }
 
     // Set up room message handling — host broadcasts everything to all peers
     r.onMessage((data: string | Uint8Array, peerId: string) => {
