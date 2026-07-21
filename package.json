@@ -1,12 +1,19 @@
 {
   "name": "p2p-collab-files",
   "version": "0.1.0",
+  "description": "Real-time collaborative markdown editor — browser-to-browser P2P with WebRTC, Yjs CRDT, and CodeMirror 6",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "relay": "node server/ws-relay.js"
+  },
+  "author": "Joaquín Vergara",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joverval/p2p-collab-files"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.1",
