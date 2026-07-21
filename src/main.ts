@@ -331,8 +331,9 @@ async function createRoom() {
     const d=decodeMessage(data);
     if(d.type==='yjs'){
       if(ydoc){
-        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update); isRemoteUpdate=false;
+        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
         if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+        isRemoteUpdate=false;
       }
       room!.send(data);
     } else {
@@ -430,8 +431,9 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     const d=decodeMessage(data);
     if(d.type==='yjs'){
       if(ydoc){
-        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update); isRemoteUpdate=false;
+        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
         if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+        isRemoteUpdate=false;
       }
     } else {
       if(d.text.startsWith('[USERS]')){
