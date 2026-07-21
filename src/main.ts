@@ -168,7 +168,10 @@ function updateTopBar() {
 }
 // Sync filename to fileHandle when changed
 $('topbar-filename').addEventListener('input', ()=>{
-  // user can edit filename freely
+  const name = ($('topbar-filename') as HTMLElement).textContent || 'Untitled.md';
+  if(isHost && room && connected) {
+    room.send(encodeChat(`[FILENAME]${name}`));
+  }
 });
 
 function broadcastUserList() {
@@ -217,6 +220,7 @@ $('open-file-btn').addEventListener('click', async ()=>{
     ydoc.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,c); });
     if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:c}});
     ($('topbar-filename') as HTMLElement).textContent = h.name;
+    if(room && connected) room.send(encodeChat(`[FILENAME]${h.name}`));
     addChatLog('system',`📂 Opened: ${h.name}`);
   } catch(err:any){ if(err.name!=='AbortError') addChatLog('system',`ERROR: ${err.message}`); }
 });
@@ -233,7 +237,7 @@ $('save-file-btn').addEventListener('click', async ()=>{
     try {
       const h=await window.showSaveFilePicker({suggestedName:name,types:[{description:'Markdown',accept:{'text/markdown':['.md']}}]});
       const w=await h.createWritable(); await w.write(content); await w.close();
-      if(isHost){ fileHandle=h; ($('topbar-filename') as HTMLElement).textContent=h.name; }
+      if(isHost){ fileHandle=h; ($('topbar-filename') as HTMLElement).textContent=h.name; if(room&&connected) room.send(encodeChat(`[FILENAME]${h.name}`)); }
       addChatLog('system',`💾 Saved: ${h.name}`);
     } catch(err:any){ if(err.name!=='AbortError') addChatLog('system',`ERROR: ${err.message}`); }
   } else {
@@ -306,6 +310,8 @@ async function createRoom() {
   ($('open-file-btn') as HTMLButtonElement).disabled = false;
   ($('save-file-btn') as HTMLButtonElement).disabled = false;
   initEditor();
+        // Announce email to host
+        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
 
   if(useRelay){
     ws!.onmessage = e=>{
@@ -343,8 +349,20 @@ async function createRoom() {
       room!.send(data);
     } else {
       const sender = peerEmails.get(peerId)||peerId;
-      addChatLog('received',`${sender}: ${d.text}`);
-      room!.send(encodeChat(`${sender}: ${d.text}`));
+      if(d.text.startsWith('[EMAIL]')){
+        const peerEmail = d.text.slice(7);
+        peerEmails.set(peerId, peerEmail);
+        // Update user list entry
+        const idx = allUsers.findIndex(u=>!u.isHost && u.email === peerId);
+        if(idx>=0) allUsers[idx] = {email:peerEmail, isHost:false};
+        updateTopBar(); broadcastUserList();
+      } else if(d.text.startsWith('[FILENAME]')){
+        ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
+        room!.send(encodeChat(d.text)); // forward to other peers
+      } else {
+        addChatLog('received',`${sender}: ${d.text}`);
+        room!.send(encodeChat(`${sender}: ${d.text}`));
+      }
     }
   });
 
@@ -416,6 +434,8 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
         ($('open-file-btn') as HTMLButtonElement).style.display='none';
         ($('save-file-btn') as HTMLButtonElement).disabled=false;
         initEditor();
+        // Announce email to host
+        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
       } else if(m.type==='rejected') addChatLog('system',`❌ Rejected: ${m.message}`);
     };
   } else {
@@ -428,6 +448,8 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     ($('open-file-btn') as HTMLButtonElement).style.display='none';
     ($('save-file-btn') as HTMLButtonElement).disabled=false;
     initEditor();
+        // Announce email to host
+        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
     addChatLog('system','📋 Copy the answer link & send to host');
   }
 
@@ -446,6 +468,8 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     } else {
       if(d.text.startsWith('[USERS]')){
         try { const ud=JSON.parse(d.text.slice(7)); if(ud.type==='users'){ allUsers=ud.users; updateTopBar(); } } catch {}
+      } else if(d.text.startsWith('[FILENAME]')){
+        ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
       } else addChatLog('received',d.text);
     }
   });
