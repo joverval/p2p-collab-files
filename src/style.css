@@ -132,7 +132,38 @@ button.reject-btn:hover { background: #f85149; }
   margin-bottom: 6px;
 }
 
-/* ── Editor ── */
+/* ── Dropdown ── */
+.dropdown { position: relative; }
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  min-width: 160px;
+  padding: 4px 0;
+  z-index: 200;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.dropdown-menu.show { display: block; }
+.dropdown-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: #c9d1d9;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 400;
+}
+.dropdown-menu button:hover { background: #1f6feb; }
+.dropdown-menu button:disabled { color: #484f58; cursor: default; }
+.dropdown-menu button:disabled:hover { background: none; }
+
+/* ── Editor (simplified) ── */
 #editor-section { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 #editor-toolbar { display: flex; align-items: center; justify-content: flex-end; padding: 4px 0; }
 #editor {

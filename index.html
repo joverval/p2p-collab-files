@@ -15,6 +15,15 @@
     <span id="topbar-filename" contenteditable="true">Untitled.md</span>
   </div>
   <div class="topbar-right">
+    <!-- File menu -->
+    <div class="dropdown">
+      <button class="icon-btn" id="file-menu-btn" title="File">📂</button>
+      <div class="dropdown-menu" id="file-dropdown">
+        <button id="open-file-btn" disabled>📂 Open File</button>
+        <button id="save-file-btn" disabled>💾 Save</button>
+        <button id="sync-btn" disabled style="display:none;">🔄 Sync from Host</button>
+      </div>
+    </div>
     <button class="icon-btn panel-btn" data-panel="info" title="How it works">ℹ️</button>
     <button class="icon-btn panel-btn" data-panel="users" title="Connected users">
       <span>👤</span>
@@ -51,12 +60,6 @@
 
     <!-- Editor -->
     <div id="editor-section" style="display:none;">
-      <div id="editor-toolbar">
-        <div class="btn-row" style="justify-content:flex-end;">
-          <button id="open-file-btn" disabled>📂 Open</button>
-          <button id="save-file-btn" disabled>💾 Save</button>
-        </div>
-      </div>
       <div id="editor"></div>
     </div>
 

@@ -179,7 +179,22 @@ function broadcastUserList() {
   room.send(encodeChat(`[USERS]${JSON.stringify({type:'users',users:allUsers})}`));
 }
 
-// ── Editor ──
+let _emailSent = false;
+
+// ── File dropdown toggle ──
+$('file-menu-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  $('file-dropdown').classList.toggle('show');
+});
+document.addEventListener('click', () => $('file-dropdown').classList.remove('show'));
+
+// ── Sync from host ──
+$('sync-btn').addEventListener('click', () => {
+  if(!isHost && room) {
+    room.send(encodeChat('[SYNC]'));
+    addChatLog('system','🔄 Requested sync from host');
+  }
+});
 function initEditor() {
   addChatLog('system','📝 Editor ready');
   $('editor-section').style.display = 'flex';
@@ -310,10 +325,6 @@ async function createRoom() {
   ($('open-file-btn') as HTMLButtonElement).disabled = false;
   ($('save-file-btn') as HTMLButtonElement).disabled = false;
   initEditor();
-        // Announce email to host after connection is ready
-        setTimeout(() => {
-          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
-        }, 1000);
 
   if(useRelay){
     ws!.onmessage = e=>{
@@ -358,6 +369,10 @@ async function createRoom() {
         const idx = allUsers.findIndex(u=>!u.isHost && u.email === peerId);
         if(idx>=0) allUsers[idx] = {email:peerEmail, isHost:false};
         updateTopBar(); broadcastUserList();
+      } else if(d.text.startsWith('[SYNC]')){
+        if(ydoc){
+          room!.send(encodeYjs(Y.encodeStateAsUpdate(ydoc)));
+        }
       } else if(d.text.startsWith('[FILENAME]')){
         ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
         room!.send(encodeChat(d.text)); // forward to other peers
@@ -435,11 +450,8 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
         connected=true; updateTopBar();
         ($('open-file-btn') as HTMLButtonElement).style.display='none';
         ($('save-file-btn') as HTMLButtonElement).disabled=false;
+        ($('sync-btn') as HTMLButtonElement).style.display='';
         initEditor();
-        // Announce email to host after connection is ready
-        setTimeout(() => {
-          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
-        }, 1000);
       } else if(m.type==='rejected') addChatLog('system',`❌ Rejected: ${m.message}`);
     };
   } else {
@@ -452,10 +464,6 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     ($('open-file-btn') as HTMLButtonElement).style.display='none';
     ($('save-file-btn') as HTMLButtonElement).disabled=false;
     initEditor();
-        // Announce email to host after connection is ready
-        setTimeout(() => {
-          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
-        }, 1000);
     addChatLog('system','📋 Copy the answer link & send to host');
   }
 
@@ -463,6 +471,11 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     if(!(data instanceof Uint8Array)) return;
     const d=decodeMessage(data);
     if(d.type==='yjs'){
+      // First Yjs update means connection is live — announce email
+      if(!_emailSent && myEmail && !isHost) {
+        _emailSent = true;
+        room!.send(encodeChat(`[EMAIL]${myEmail}`));
+      }
       if(ydoc){
         isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
         const newText = ytext!.toString();
