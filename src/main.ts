@@ -2,6 +2,9 @@ import { P2PRoom } from '@joverval/p2p-collab';
 import type { Room } from '@joverval/p2p-collab';
 import './style.css';
 
+declare const __BUILD_TIME__: string;
+console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
+
 import * as Y from 'yjs';
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';

@@ -4,7 +4,10 @@ import path from 'path';
 export default defineConfig({
   base: './',
   server: { port: 8082 },
-  define: { global: 'globalThis' },
+  define: {
+    global: 'globalThis',
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   resolve: {
     alias: {
       'simple-peer': path.resolve(__dirname, 'vendor/simple-peer.js'),
