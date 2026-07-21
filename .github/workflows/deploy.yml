@@ -19,27 +19,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: app
 
       - uses: actions/checkout@v4
         with:
           repository: joverval/p2p-collab
-          path: p2p-collab
+          path: lib
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - run: cd p2p-collab && npm ci && npm run build
+      - run: cd lib && npm ci && npm run build
 
-      - run: cd app && npm ci && npm run build
+      # Create symlink so vite alias '../p2p-collab/dist/index.js' resolves
+      - run: ln -s "$PWD/lib" "$PWD/../p2p-collab"
+
+      - run: npm ci
+      - run: npm run build
 
       - uses: actions/configure-pages@v4
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: app/dist
+          path: dist
 
       - uses: actions/deploy-pages@v4
         id: deployment

@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.1",
-    "@joverval/p2p-collab": "file:../p2p-collab",
     "codemirror": "^6.0.2",
     "ws": "^8.21.1",
     "yjs": "^13.6.31"
