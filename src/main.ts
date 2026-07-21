@@ -444,6 +444,7 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
       onError: (err: Error) => log('system', `ERROR: ${err.message}`),
     });
     const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
+    log('system', `Connected, answer: ${answerUrl.substring(0, 40)}...`);
     room = peer;
 
     const match = answerUrl.match(/#sdp=(.*)/);
