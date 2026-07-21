@@ -9,731 +9,447 @@ import * as Y from 'yjs';
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
 
-// File System Access API types
-declare global {
-  interface Window {
-    showOpenFilePicker(o?: any): Promise<FileSystemFileHandle[]>;
-    showSaveFilePicker(o?: any): Promise<FileSystemFileHandle>;
-  }
-}
+declare global { interface Window { showOpenFilePicker(o?:any): Promise<FileSystemFileHandle[]>; showSaveFilePicker(o?:any): Promise<FileSystemFileHandle>; } }
 
 // ── DOM Helpers ──
-
 function $(id: string): HTMLElement { return document.getElementById(id)!; }
-function el(tag: string, attrs: Record<string, string> = {}, children: (string | Node)[] = []): HTMLElement {
+function el(tag: string, attrs: Record<string,string>={}, kids:(string|Node)[]=[]): HTMLElement {
   const e = document.createElement(tag);
-  Object.entries(attrs).forEach(([k, v]) => e.setAttribute(k, v));
-  children.forEach(c => e.append(c));
+  Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,v));
+  kids.forEach(c=>e.append(c));
   return e;
 }
 
-function log(type: string, text: string) {
-  const logEl = $('chat-log');
-  logEl.innerHTML += `<div class="entry ${type}">[${new Date().toLocaleTimeString()}] ${text}</div>`;
-  logEl.scrollTop = logEl.scrollHeight;
+// ── Right Panel ──
+let _currentPanel = '';
+function openPanel(name: string) {
+  if (_currentPanel === name) { closePanel(); return; }
+  _currentPanel = name;
+  const panel = $('right-panel');
+  panel.classList.remove('panel-hidden');
+  $('panel-title').textContent = name === 'chat' ? '💬 Chat' : name === 'users' ? '👤 Users' : '📖 How it works';
+  const body = $('panel-body');
+  body.innerHTML = '';
+
+  if (name === 'users') renderUserPanel(body);
+  else if (name === 'info') renderInfoPanel(body);
+  else if (name === 'chat') renderChatPanel(body);
+
+  // Update active button
+  document.querySelectorAll('.panel-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelector(`[data-panel="${name}"]`)?.classList.add('active');
+  // Clear chat notif
+  if (name === 'chat') { _unread = 0; updateNotif(); }
+}
+function closePanel() {
+  _currentPanel = '';
+  $('right-panel').classList.add('panel-hidden');
+  document.querySelectorAll('.panel-btn').forEach(b=>b.classList.remove('active'));
+}
+$('panel-close').addEventListener('click', closePanel);
+document.querySelectorAll('.panel-btn').forEach(btn=>{
+  btn.addEventListener('click', ()=>openPanel((btn as HTMLElement).dataset.panel!));
+});
+
+function renderUserPanel(body: HTMLElement) {
+  for (const u of allUsers) {
+    const role = u.isHost ? 'Host' : `Peer ${allUsers.filter(x=>!x.isHost).indexOf(u)+1}`;
+    body.appendChild(el('div',{class:'user-panel-item'+(u.isHost?' host':'')},[
+      el('span',{},[u.email]),
+      el('span',{class:'role'},[` — ${role}`]),
+    ]));
+  }
 }
 
-function setStatus(cls: string, text: string) {
-  const el = $('main-status');
-  el.className = `status ${cls}`;
-  el.textContent = text;
+function renderInfoPanel(body: HTMLElement) {
+  body.innerHTML = `<div class="info-section">
+<h3>🖥️ Host</h3>
+<p>1. Enter email & click <b>Create Room</b></p>
+<p>2. Click <b>📋 Copy invite</b> and share</p>
+<p>3. Approve or reject peers</p>
+<p>4. If manual: paste answer URL</p>
+<hr>
+<h3>👤 Peer</h3>
+<p>1. Open invite link from host</p>
+<p>2. Enter email & click <b>Join Room</b></p>
+<p>3. Wait for host approval</p>
+<p>4. If manual: click copy & send answer</p>
+<hr>
+<h3>📝 Editing</h3>
+<p>• <b>📂 Open</b> (host) — load .md file</p>
+<p>• <b>💾 Save</b> — save local copy</p>
+<p>• <b>👤 Users</b> — see connected peers</p>
+<p>• <b>💬 Chat</b> — open chat</p>
+</div>`;
 }
 
-// ── Email validation ──
+function renderChatPanel(body: HTMLElement) {
+  body.innerHTML = `<div id="chat-log"></div>
+<div class="chat-input-row"><input id="chat-input" placeholder="Type..." disabled><button id="chat-send-btn" disabled>Send</button></div>`;
+  // Restore chat log
+  const logEl = body.querySelector('#chat-log')!;
+  logEl.innerHTML = _chatLogHTML;
+  // Bind send
+  const input = body.querySelector('#chat-input') as HTMLInputElement;
+  const sendBtn = body.querySelector('#chat-send-btn') as HTMLButtonElement;
+  if (connected) { input.disabled = false; sendBtn.disabled = false; }
+  sendBtn.addEventListener('click', sendChat);
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') sendChat(); });
+}
 
+// ── Chat log (persisted HTML across panel opens) ──
+let _chatLogHTML = '';
+let _unread = 0;
+
+function addChatLog(type: string, text: string) {
+  const t = new Date().toLocaleTimeString();
+  _chatLogHTML += `<div class="log-entry ${type}">[${t}] ${text}</div>`;
+  // Update if panel is open
+  const cl = document.querySelector('#chat-log');
+  if (cl) {
+    cl.innerHTML = _chatLogHTML;
+    cl.scrollTop = cl.scrollHeight;
+  }
+  if (_currentPanel !== 'chat') {
+    _unread++;
+    updateNotif();
+  }
+}
+function updateNotif() {
+  ($('chat-notif') as HTMLElement).classList.toggle('show', _unread > 0);
+}
+
+// ── Message encoding ──
+function encodeChat(text: string): Uint8Array { const e=new TextEncoder().encode(text); const m=new Uint8Array(1+e.length); m[0]=0x00; m.set(e,1); return m; }
+function encodeYjs(data: Uint8Array): Uint8Array { const m=new Uint8Array(1+data.length); m[0]=0x01; m.set(data,1); return m; }
+function decodeMessage(data: Uint8Array): {type:'chat',text:string}|{type:'yjs',update:Uint8Array} {
+  if(data.length===0) return {type:'chat',text:''};
+  if(data[0]===0x01) return {type:'yjs',update:data.slice(1)};
+  const s=data[0]===0x00?1:0;
+  return {type:'chat',text:new TextDecoder().decode(data.slice(s))};
+}
+
+// ── Email ──
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function validateEmail(email: string): boolean {
-  return EMAIL_RE.test(email);
-}
-
-// ── Message encoding (0x00 = chat, 0x01 = Yjs) ──
-
-function encodeChat(text: string): Uint8Array {
-  const enc = new TextEncoder().encode(text);
-  const msg = new Uint8Array(1 + enc.length);
-  msg[0] = 0x00;
-  msg.set(enc, 1);
-  return msg;
-}
-
-function encodeYjs(data: Uint8Array): Uint8Array {
-  const msg = new Uint8Array(1 + data.length);
-  msg[0] = 0x01;
-  msg.set(data, 1);
-  return msg;
-}
-
-function decodeMessage(data: Uint8Array): { type: 'chat'; text: string } | { type: 'yjs'; update: Uint8Array } {
-  if (data.length === 0) return { type: 'chat', text: '' };
-  if (data[0] === 0x01) return { type: 'yjs', update: data.slice(1) };
-  const start = data[0] === 0x00 ? 1 : 0;
-  return { type: 'chat', text: new TextDecoder().decode(data.slice(start)) };
-}
+function validateEmail(e: string) { return EMAIL_RE.test(e); }
 
 // ── WS Relay ──
-
 const WS_URL = `ws://${window.location.hostname}:8083`;
-let ws: WebSocket | null = null;
-
+let ws: WebSocket|null = null;
 function wsConnect(): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const s = new WebSocket(WS_URL);
-    s.onopen = () => resolve(s);
-    s.onerror = () => reject(new Error('WS connection failed'));
-    s.onclose = () => { ws = null; };
-    ws = s;
+  return new Promise((resolve,reject)=>{
+    const s=new WebSocket(WS_URL);
+    s.onopen=()=>resolve(s);
+    s.onerror=()=>reject(new Error('WS connection failed'));
+    s.onclose=()=>{ws=null;};
+    ws=s;
   });
 }
 
 // ── State ──
-
-let myEmail = '';
-let isHost = false;
-let room: Room | null = null;
-let connected = false;
-let allUsers: { email: string; isHost: boolean }[] = [];
-const peerEmails: Map<string, string> = new Map(); // peerId → email
-let _pendingPeerEmail = ''; // email of peer currently connecting
+let myEmail = '', isHost = false, connected = false;
+let room: Room|null = null;
+let allUsers: {email:string,isHost:boolean}[] = [];
+let _pendingPeerEmail = '';
 const baseUrl = window.location.href.split('#')[0];
 
 // Yjs
-let ydoc: Y.Doc | null = null;
-let ytext: Y.Text | null = null;
-let editorView: EditorView | null = null;
+let ydoc: Y.Doc|null = null, ytext: Y.Text|null = null, editorView: EditorView|null = null;
 let isRemoteUpdate = false;
 
 // File
-let fileHandle: FileSystemFileHandle | null = null;
+let fileHandle: FileSystemFileHandle|null = null;
 
-// ── Top Bar ──
-
+// ── Top Bar / Filename ──
 function updateTopBar() {
   $('topbar').style.display = 'flex';
-  $('topbar-filename').textContent = fileHandle ? `📄 ${fileHandle.name}` : '📄 Untitled.md';
   $('user-count').textContent = String(allUsers.length);
-  const dd = $('user-dropdown');
-  dd.innerHTML = '';
-  for (const u of allUsers) {
-    dd.appendChild(el('div', {
-      class: 'user-dropdown-item' + (u.isHost ? ' host' : ''),
-    }, [u.isHost ? `[Host] ${u.email}` : u.email]));
-  }
 }
+// Sync filename to fileHandle when changed
+$('topbar-filename').addEventListener('input', ()=>{
+  // user can edit filename freely
+});
 
-// Broadcast user list to all peers
 function broadcastUserList() {
-  if (!isHost || !room || !connected) return;
-  const list = JSON.stringify({ type: 'users', users: allUsers });
-  room.send(encodeChat(`[USERS]${list}`));
+  if(!isHost||!room||!connected) return;
+  room.send(encodeChat(`[USERS]${JSON.stringify({type:'users',users:allUsers})}`));
 }
 
-// ── User dropdown toggle ──
-$('user-counter').addEventListener('click', (e) => {
-  e.stopPropagation();
-  $('user-dropdown').classList.toggle('show');
-});
-document.addEventListener('click', () => {
-  $('user-dropdown').classList.remove('show');
-});
-
-// ── Chat sidebar toggle ──
-let _chatVisible = false;
-function toggleChat() {
-  _chatVisible = !_chatVisible;
-  const sidebar = $('chat-sidebar');
-  const btn = $('chat-toggle') as HTMLButtonElement;
-  if (_chatVisible) {
-    sidebar.classList.remove('chat-sidebar-hidden');
-    btn.classList.add('active');
-  } else {
-    sidebar.classList.add('chat-sidebar-hidden');
-    btn.classList.remove('active');
-  }
-}
-($('chat-toggle') as HTMLButtonElement).addEventListener('click', toggleChat);
-($('chat-close') as HTMLButtonElement).addEventListener('click', toggleChat);
-
-// ── Info modal ──
-($('info-btn') as HTMLButtonElement).addEventListener('click', () => {
-  ($('info-modal') as HTMLElement).style.display = 'flex';
-});
-($('info-close') as HTMLButtonElement).addEventListener('click', () => {
-  ($('info-modal') as HTMLElement).style.display = 'none';
-});
-($('info-modal') as HTMLElement).querySelector('.info-overlay')!.addEventListener('click', () => {
-  ($('info-modal') as HTMLElement).style.display = 'none';
-});
-
-// ── Pending Requests ──
-
-function addPendingRequest(email: string, offerId: string) {
-  try {
-    $('pending-section').style.display = 'block';
-    const list = $('pending-list');
-
-    const item = el('div', { class: 'pending-item' }, [
-      el('span', {}, [`🔔 ${email} wants to join`]),
-      el('div', { class: 'btn-row' }, [
-        el('button', {}, ['Approve']),
-        el('button', { class: 'reject-btn' }, ['Reject']),
-      ]),
-    ]);
-
-    const [approveBtn, rejectBtn] = item.querySelectorAll('button');
-
-    approveBtn.addEventListener('click', () => {
-      if (!ws) { log('system', 'ERROR: WS disconnected'); return; }
-      ws.send(JSON.stringify({ type: 'host-approve', email, offerId }));
-      item.remove();
-      if ($('pending-list').children.length === 0) {
-        $('pending-section').style.display = 'none';
-      }
-    });
-
-    rejectBtn.addEventListener('click', () => {
-      if (!ws) { log('system', 'ERROR: WS disconnected'); return; }
-      ws.send(JSON.stringify({ type: 'host-reject', email }));
-      item.remove();
-      if ($('pending-list').children.length === 0) {
-        $('pending-section').style.display = 'none';
-      }
-    });
-
-    list.appendChild(item);
-  } catch (e: any) {
-    log('system', `ERROR showing pending request: ${e?.message || e}`);
-  }
-}
-
-// ── CodeMirror editor ──
-
+// ── Editor ──
 function initEditor() {
-  log('system', 'initEditor called');
-  const editorEl = $('editor');
+  addChatLog('system','📝 Editor ready');
   $('editor-section').style.display = 'flex';
-
+  $('handshake-bar').style.display = 'flex';
   ydoc = new Y.Doc();
   ytext = ydoc.getText('markdown');
-
   editorView = new EditorView({
     doc: '',
     extensions: [
-      basicSetup,
-      markdown(),
-      EditorView.updateListener.of((update) => {
-        if (update.docChanged && !isRemoteUpdate) {
-          // Local edit → Yjs
-          const value = update.state.doc.toString();
-          ydoc!.transact(() => {
-            ytext!.delete(0, ytext!.length);
-            ytext!.insert(0, value);
-          });
+      basicSetup, markdown(),
+      EditorView.updateListener.of((update)=>{
+        if(update.docChanged && !isRemoteUpdate) {
+          const v = update.state.doc.toString();
+          ydoc!.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,v); });
         }
       }),
       EditorView.theme({
-        '&': { backgroundColor: '#0d1117' },
-        '.cm-gutters': { backgroundColor: '#0d1117', borderRight: '1px solid #21262d', color: '#484f58' },
-        '.cm-activeLineGutter': { backgroundColor: '#161b22' },
+        '&':{backgroundColor:'#0d1117'},
+        '.cm-gutters':{backgroundColor:'#0d1117',borderRight:'1px solid #21262d',color:'#484f58'},
+        '.cm-activeLineGutter':{backgroundColor:'#161b22'},
       }),
     ],
-    parent: editorEl,
+    parent: $('editor'),
   });
-
-  // Yjs update → send to peers
-  ydoc.on('update', (update: Uint8Array) => {
-    if (isRemoteUpdate) return;
-    if (room && connected) room.send(encodeYjs(update));
+  ydoc.on('update',(update:Uint8Array)=>{
+    if(isRemoteUpdate) return;
+    if(room && connected) room.send(encodeYjs(update));
   });
-
-  ($('chat-input') as HTMLInputElement).disabled = false;
-  ($('chat-send-btn') as HTMLButtonElement).disabled = false;
 }
 
-// ── HOST ──
-
-async function createRoom() {
-  // Disable immediately to prevent double-clicks / HMR duplicate listeners
-  const btn = $('create-room-btn') as HTMLButtonElement;
-  if (btn.disabled) return;
-  btn.disabled = true;
-
-  const email = ($('email-input') as HTMLInputElement).value.trim();
-  if (!validateEmail(email)) {
-    log('system', 'ERROR: Please enter a valid email');
-    btn.disabled = false;
-    return;
-  }
-  myEmail = email;
-  isHost = true;
-  allUsers = [{ email: myEmail, isHost: true }];
-  ($('email-input') as HTMLInputElement).disabled = true;
-
-  log('system', 'Creating room...');
-  setStatus('connecting', 'connecting to relay');
-
+// ── File System ──
+$('open-file-btn').addEventListener('click', async ()=>{
+  if(!isHost||!ydoc) return;
   try {
-    // Try WS relay — fall back to manual if unavailable
-    let useRelay = false;
+    const [h]=await window.showOpenFilePicker({types:[{description:'Markdown',accept:{'text/markdown':['.md']}}]});
+    fileHandle = h;
+    const c=await (await h.getFile()).text();
+    ydoc.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,c); });
+    if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:c}});
+    ($('topbar-filename') as HTMLElement).textContent = h.name;
+    addChatLog('system',`📂 Opened: ${h.name}`);
+  } catch(err:any){ if(err.name!=='AbortError') addChatLog('system',`ERROR: ${err.message}`); }
+});
+
+$('save-file-btn').addEventListener('click', async ()=>{
+  if(!ytext) return;
+  const content = ytext.toString();
+  const name = ($('topbar-filename') as HTMLElement).textContent || 'document.md';
+  if(hasFileSystemAPI()){
+    if(isHost && fileHandle){
+      try { const w=await fileHandle.createWritable(); await w.write(content); await w.close(); addChatLog('system',`💾 Saved: ${fileHandle.name}`); return; }
+      catch(err:any){ addChatLog('system',`ERROR: ${err.message}`); }
+    }
     try {
-      await Promise.race([
-        wsConnect(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
-      ]);
-      useRelay = true;
-    } catch {
-      log('system', '⚠️ Relay unavailable — using manual copy-paste mode');
-    }
-
-    let roomId = '';
-    if (useRelay) {
-      roomId = await new Promise<string>((resolve) => {
-        ws!.onmessage = (e) => {
-          const msg = JSON.parse(e.data);
-          if (msg.type === 'registered') resolve(msg.room);
-        };
-        ws!.send(JSON.stringify({ type: 'host-register' }));
-      });
-      log('system', `Room registered: ${roomId}`);
-    }
-
-    // Create WebRTC offer
-    log('system', 'Generating WebRTC offer...');
-
-        // Use P2PRoom directly (createRoom wrapper is broken by Vite module transform)
-        const r = new P2PRoom(true, baseUrl, {
-          onError: (err: Error) => log('system', `ERROR: ${err.message}`),
-        });
-        const { url, offerId } = await r.offerUrl();
-        _currentOfferId = offerId;
-        room = r;
-
-    const sdpB64 = url.match(/#sdp=(.*)/)?.[1] || '';
-    const shareUrl = useRelay
-      ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`
-      : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
-
-    // Show simplified handshake: copy button
-    $('handshake-section').style.display = 'block';
-    ($('copy-invite-btn') as HTMLButtonElement).style.display = 'inline-block';
-    ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
-      navigator.clipboard.writeText(shareUrl).then(() => {
-        ($('invite-copied') as HTMLElement).style.display = 'inline';
-        setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
-      }).catch(() => log('system', '⚠️ Could not copy'));
-    };
-
-    setStatus('connecting', 'waiting for peer');
-    log('system', '📋 Copy the invite link and share with a peer');
-
-    // Host can start working immediately
-    initEditor();
-    log('system', '📝 Editor ready');
-
-    // Enable file buttons
-    ($('open-file-btn') as HTMLButtonElement).disabled = false;
-    ($('save-file-btn') as HTMLButtonElement).disabled = false;
-
-    if (useRelay) {
-      // WS relay mode: handle pending requests and answer forwarding
-      ws!.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'peer-request') {
-          log('system', `📩 ${msg.email} wants to join`);
-          addPendingRequest(msg.email, msg.offerId || '');
-        } else if (msg.type === 'answer') {
-          log('system', `✅ ${msg.email || 'Peer'} approved — applying answer...`);
-          _pendingPeerEmail = msg.email || '';
-          room!.acceptAnswer(msg.offerId || '', `#sdp=${msg.answerB64}`);
-          log('system', 'Answer applied, waiting for connection...');
-        }
-      };
-    } else {
-      // Manual mode: show answer input for host to paste peer's answer
-      function setupManualAnswer() {
-        $('manual-answer-row').style.display = 'block';
-        ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
-          const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
-          if (!raw || !room) return;
-          const match = raw.match(/#sdp=(.*)/);
-          const answerB64 = match ? decodeURIComponent(match[1]) : raw;
-          log('system', `Applying answer for offer ${_currentOfferId}...`);
-          room.acceptAnswer(_currentOfferId, `#sdp=${answerB64}`);
-          log('system', 'Manual answer applied, waiting for connection...');
-          ($('manual-answer-input') as HTMLInputElement).value = '';
-        };
-      }
-      setupManualAnswer();
-    }
-
-    // Set up room message handling — host broadcasts everything to all peers
-    r.onMessage((data: string | Uint8Array, peerId: string) => {
-      if (!(data instanceof Uint8Array)) return;
-      const decoded = decodeMessage(data);
-      if (decoded.type === 'yjs') {
-        if (ydoc) {
-          isRemoteUpdate = true;
-          Y.applyUpdate(ydoc, decoded.update);
-          isRemoteUpdate = false;
-          if (editorView) {
-            editorView.dispatch({
-              changes: { from: 0, to: editorView.state.doc.length, insert: ytext!.toString() },
-            });
-          }
-        }
-        // Forward to all peers (Yjs handles duplicates gracefully)
-        room!.send(data);
-      } else {
-        const senderEmail = peerEmails.get(peerId) || peerId;
-        log('received', `${senderEmail}: ${decoded.text}`);
-        // Relay to all peers with sender email prefix
-        const relayText = encodeChat(`${senderEmail}: ${decoded.text}`);
-        room!.send(relayText);
-      }
-    });
-
-    r.onPeerJoin(async (peerId: string) => {
-      connected = true;
-      const peerEmail = _pendingPeerEmail || peerId;
-      peerEmails.set(peerId, peerEmail);
-      allUsers.push({ email: peerEmail, isHost: false });
-      _pendingPeerEmail = '';
-      setStatus('connected', `connected (${allUsers.length} peer(s))`);
-      updateTopBar();
-      broadcastUserList();
-      log('system', `🎉 ${peerEmail} connected!`);
-      // Send current document state to newly connected peer
-      if (ydoc) {
-        const state = Y.encodeStateAsUpdate(ydoc);
-        room!.send(encodeYjs(state));
-        log('system', `Sent initial state (${state.length} bytes)`);
-      }
-      // Generate new invite link for next peer
-      try {
-        const { url: newUrl, offerId: newOfferId } = await r.offerUrl();
-        _currentOfferId = newOfferId;
-        const newSdpB64 = newUrl.match(/#sdp=(.*)/)?.[1] || '';
-        const newShareUrl = useRelay
-          ? `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`
-          : `${baseUrl}#offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`;
-        // Update copy button with new invite link
-        ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
-          navigator.clipboard.writeText(newShareUrl).then(() => {
-            ($('invite-copied') as HTMLElement).style.display = 'inline';
-            setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
-          }).catch(() => {});
-        };
-        log('system', 'New invite link ready for next peer');
-        // In manual mode, show answer input again for next peer
-        if (!useRelay) {
-          $('manual-answer-row').style.display = 'block';
-        }
-      } catch (err: any) {
-        log('system', `ERROR generating new offer: ${err.message}`);
-      }
-    });
-
-  } catch (err: any) {
-    setStatus('error', 'error');
-    log('system', `ERROR: ${err.message}`);
-    ($('create-room-btn') as HTMLButtonElement).disabled = false;
-    ($('email-input') as HTMLInputElement).disabled = false;
+      const h=await window.showSaveFilePicker({suggestedName:name,types:[{description:'Markdown',accept:{'text/markdown':['.md']}}]});
+      const w=await h.createWritable(); await w.write(content); await w.close();
+      if(isHost){ fileHandle=h; ($('topbar-filename') as HTMLElement).textContent=h.name; }
+      addChatLog('system',`💾 Saved: ${h.name}`);
+    } catch(err:any){ if(err.name!=='AbortError') addChatLog('system',`ERROR: ${err.message}`); }
+  } else {
+    fallbackSaveFile(content, name);
+    addChatLog('system',`💾 Downloaded: ${name}`);
   }
+});
+
+function hasFileSystemAPI(){ return typeof window.showOpenFilePicker === 'function'; }
+let _fileInput: HTMLInputElement|null = null;
+function getFileInput(){ if(!_fileInput){ _fileInput=el('input',{type:'file',accept:'.md'}) as HTMLInputElement; _fileInput.style.display='none'; document.body.appendChild(_fileInput); } return _fileInput; }
+function fallbackOpenFile(): Promise<{name:string,content:string}> {
+  return new Promise((resolve,reject)=>{
+    const i=getFileInput();
+    i.onchange=async()=>{ const f=i.files?.[0]; if(!f) return reject(new Error('No file')); resolve({name:f.name,content:await f.text()}); };
+    i.click();
+  });
 }
-
-let _currentOfferId = '';  // current pending offer ID for manual mode
-
-// ── PEER ──
-
-function parseRoomFromUrl(): { roomId: string; offerId: string; offer: string } | null {
-  const hash = window.location.hash;
-  if (!hash) return null;
-  // Relay mode: #room=<id>&offer=<id>&sdp=<b64>
-  const m1 = hash.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/);
-  if (m1) return { roomId: m1[1], offerId: m1[2], offer: decodeURIComponent(m1[3]) };
-  // Manual mode: #offer=<id>&sdp=<b64>
-  const m2 = hash.match(/^#offer=([^&]+)&sdp=(.+)$/);
-  if (m2) return { roomId: '', offerId: m2[1], offer: decodeURIComponent(m2[2]) };
-  return null;
-}
-
-async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
-  const btn = $('create-room-btn') as HTMLButtonElement;
-  if (btn.disabled) return;
-  btn.disabled = true;
-
-  const email = ($('email-input') as HTMLInputElement).value.trim();
-  if (!validateEmail(email)) {
-    log('system', 'ERROR: Please enter a valid email to join');
-    return;
-  }
-  myEmail = email;
-  ($('email-input') as HTMLInputElement).disabled = true;
-  ($('create-room-btn') as HTMLButtonElement).disabled = true;
-
-  log('system', `Joining room ${roomId || '(manual)'} as ${email}...`);
-  setStatus('connecting', roomId ? 'connecting to relay' : 'connecting (manual)');
-
-  try {
-    // Try WS relay if available
-    let useRelay = false;
-    if (roomId) {
-      try {
-        await Promise.race([
-          wsConnect(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000)),
-        ]);
-        useRelay = true;
-      } catch {
-        log('system', '⚠️ Relay unavailable — using manual mode');
-      }
-    }
-
-    // Join room (use P2PRoom directly — joinRoom wrapper broken by Vite)
-    const peer = new P2PRoom(false, baseUrl, {
-      onError: (err: Error) => log('system', `ERROR: ${err.message}`),
-    });
-    const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
-    log('system', `Connected, answer: ${answerUrl.substring(0, 40)}...`);
-    room = peer;
-
-    const match = answerUrl.match(/#sdp=(.*)/);
-    const answerB64 = match ? match[1] : '';
-    if (!answerB64) throw new Error('Could not extract answer');
-
-    if (useRelay) {
-      // Send join request via WS relay
-      ws!.send(JSON.stringify({
-        type: 'peer-join-request',
-        room: roomId,
-        offerId,
-        email,
-        answerB64,
-      }));
-
-      log('system', 'Join request sent — waiting for host approval...');
-      setStatus('connecting', 'awaiting approval');
-
-      ws!.onmessage = (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'approved') {
-        setStatus('connected', 'connected');
-        connected = true;
-        allUsers.push({ email: 'Host', isHost: true });
-        updateTopBar();
-        // Peer: hide open button, enable save
-        ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
-        ($('save-file-btn') as HTMLButtonElement).disabled = false;
-        initEditor();
-      } else if (msg.type === 'rejected') {
-        setStatus('error', 'rejected');
-        log('system', `❌ Rejected: ${msg.message}`);
-      }
-    };
-    } else {
-      // Manual mode: show copy button for answer URL
-      const answerFullUrl = `${baseUrl}#sdp=${encodeURIComponent(answerB64)}`;
-      $('handshake-section').style.display = 'block';
-      ($('copy-invite-btn') as HTMLButtonElement).textContent = '📋 Copy answer link';
-      ($('copy-invite-btn') as HTMLButtonElement).style.display = 'inline-block';
-      ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
-        navigator.clipboard.writeText(answerFullUrl).then(() => {
-          ($('invite-copied') as HTMLElement).style.display = 'inline';
-          setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
-        }).catch(() => {});
-      };
-      setStatus('connected', 'connected — waiting for host to apply answer');
-      connected = true;
-      allUsers.push({ email: 'Host', isHost: true });
-      updateTopBar();
-      ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
-      ($('save-file-btn') as HTMLButtonElement).disabled = false;
-      initEditor();
-      log('system', '📋 Copy the Answer URL above and send it to the host');
-    }
-
-    // Room message handling
-    room!.onMessage((data: string | Uint8Array, peerId: string) => {
-      if (!(data instanceof Uint8Array)) return;
-      const decoded = decodeMessage(data);
-      if (decoded.type === 'yjs') {
-        if (ydoc) {
-          isRemoteUpdate = true;
-          Y.applyUpdate(ydoc, decoded.update);
-          if (editorView) {
-            editorView.dispatch({
-              changes: { from: 0, to: editorView.state.doc.length, insert: ytext!.toString() },
-            });
-          }
-          isRemoteUpdate = false;
-        }
-      } else {
-        // Check for user list broadcast
-        if (decoded.text.startsWith('[USERS]')) {
-          try {
-            const data = JSON.parse(decoded.text.slice(7));
-            if (data.type === 'users') {
-              allUsers = data.users;
-              updateTopBar();
-            }
-          } catch {}
-        } else {
-          log('received', decoded.text);
-        }
-      }
-    });
-
-  } catch (err: any) {
-    setStatus('error', 'error');
-    log('system', `ERROR: ${err.message}`);
-    ($('create-room-btn') as HTMLButtonElement).disabled = false;
-    ($('email-input') as HTMLInputElement).disabled = false;
-  }
+function fallbackSaveFile(content:string,name:string){
+  const b=new Blob([content],{type:'text/markdown'});
+  const a=el('a',{href:URL.createObjectURL(b),download:name}); a.click();
 }
 
 // ── Chat ──
-
 function sendChat() {
-  const input = $('chat-input') as HTMLInputElement;
+  const input = document.querySelector('#chat-input') as HTMLInputElement;
+  if(!input) return;
   const text = input.value.trim();
-  if (!text || !room || !connected) return;
+  if(!text||!room||!connected) return;
   const prefix = isHost ? `[Host] ${myEmail}` : myEmail;
-  const fullText = `${prefix}: ${text}`;
-  room.send(encodeChat(fullText));
-  log('sent', isHost ? `[Host]: ${text}` : text);
+  room.send(encodeChat(`${prefix}: ${text}`));
+  addChatLog('sent', isHost ? `[Host]: ${text}` : text);
   input.value = '';
 }
 
-// ── File System Access (with fallback for non-secure contexts) ──
+// ── HOST ──
+async function createRoom() {
+  const btn = $('create-room-btn') as HTMLButtonElement;
+  if(btn.disabled) return; btn.disabled = true;
+  const email = ($('email-input') as HTMLInputElement).value.trim();
+  if(!validateEmail(email)){ addChatLog('system','ERROR: Please enter a valid email'); btn.disabled=false; return; }
+  myEmail = email; isHost = true;
+  allUsers = [{email:myEmail,isHost:true}];
+  ($('email-input') as HTMLInputElement).disabled = true;
+  updateTopBar();
 
-function hasFileSystemAPI(): boolean {
-  return typeof window.showOpenFilePicker === 'function';
-}
-
-// Hidden file input for fallback
-let _fileInput: HTMLInputElement | null = null;
-
-function getFileInput(): HTMLInputElement {
-  if (!_fileInput) {
-    _fileInput = document.createElement('input');
-    _fileInput.type = 'file';
-    _fileInput.accept = '.md';
-    _fileInput.style.display = 'none';
-    document.body.appendChild(_fileInput);
-  }
-  return _fileInput;
-}
-
-function fallbackOpenFile(): Promise<{ name: string; content: string }> {
-  return new Promise((resolve, reject) => {
-    const input = getFileInput();
-    input.onchange = async () => {
-      const file = input.files?.[0];
-      if (!file) return reject(new Error('No file selected'));
-      resolve({ name: file.name, content: await file.text() });
-    };
-    input.click();
-  });
-}
-
-function fallbackSaveFile(content: string, name: string): void {
-  const blob = new Blob([content], { type: 'text/markdown' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name || 'document.md';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-// Open file — host only
-($('open-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
-  if (!isHost || !ydoc) return;
+  addChatLog('system','Creating room...');
+  let useRelay = false;
   try {
-    let name: string, content: string;
-    if (hasFileSystemAPI()) {
-      const [handle] = await window.showOpenFilePicker({
-        types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
-      });
-      fileHandle = handle;
-      name = handle.name;
-      content = await (await handle.getFile()).text();
-    } else {
-      const result = await fallbackOpenFile();
-      name = result.name;
-      content = result.content;
-    }
-    ydoc!.transact(() => { ytext!.delete(0, ytext!.length); ytext!.insert(0, content); });
-    if (editorView) {
-      editorView.dispatch({
-        changes: { from: 0, to: editorView.state.doc.length, insert: content },
-      });
-    }
-    updateTopBar();
-    log('system', `📂 Opened: ${name}`);
-  } catch (err: any) {
-    if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
-  }
-});
+    await Promise.race([wsConnect(),new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),3000))]);
+    useRelay = true;
+  } catch { addChatLog('system','⚠️ Relay unavailable — manual mode'); }
 
-// Save — available for everyone
-($('save-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
-  if (!ytext) return;
-  const content = ytext.toString();
-  if (hasFileSystemAPI()) {
-    if (isHost && fileHandle) {
-      try {
-        const w = await fileHandle.createWritable();
-        await w.write(content);
-        await w.close();
-        log('system', `💾 Saved: ${fileHandle.name}`);
-        return;
-      } catch (err: any) {
-        log('system', `ERROR saving: ${err.message}`);
-      }
-    }
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: fileHandle?.name || 'document.md',
-        types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
-      });
-      const w = await handle.createWritable();
-      await w.write(content);
-      await w.close();
-      if (isHost) { fileHandle = handle; updateTopBar(); }
-      log('system', `💾 Saved as: ${handle.name}`);
-    } catch (err: any) {
-      if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
-    }
+  let roomId = '';
+  if(useRelay){ roomId = await new Promise<string>(r=>{ ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='registered') r(m.room); }; ws!.send(JSON.stringify({type:'host-register'})); }); addChatLog('system',`Room: ${roomId}`); }
+
+  const r = new P2PRoom(true, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+  const {url,offerId} = await r.offerUrl();
+  _currentOfferId = offerId;
+  room = r;
+
+  const sdpB64 = url.match(/#sdp=(.*)/)?.[1]||'';
+  const shareUrl = useRelay ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}` : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
+  _shareUrl = shareUrl;
+
+  $('handshake-bar').style.display = 'flex';
+  ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
+  ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
+
+  ($('open-file-btn') as HTMLButtonElement).disabled = false;
+  ($('save-file-btn') as HTMLButtonElement).disabled = false;
+  initEditor();
+
+  if(useRelay){
+    ws!.onmessage = e=>{
+      const m=JSON.parse(e.data);
+      if(m.type==='peer-request'){ addChatLog('system',`📩 ${m.email} wants to join`); addPendingRequest(m.email,m.offerId||''); }
+      else if(m.type==='answer'){ _pendingPeerEmail=m.email||''; room!.acceptAnswer(m.offerId||'',`#sdp=${m.answerB64}`); addChatLog('system','Answer applied...'); }
+    };
   } else {
-    // Fallback: download as file
-    fallbackSaveFile(content, fileHandle?.name || 'document.md');
-    log('system', `💾 Downloaded: ${fileHandle?.name || 'document.md'}`);
+    ($('manual-answer-input') as HTMLInputElement).style.display = '';
+    ($('manual-answer-btn') as HTMLButtonElement).style.display = '';
+    ($('manual-answer-btn') as HTMLButtonElement).onclick = ()=>{
+      const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
+      if(!raw||!room) return;
+      const m=raw.match(/#sdp=(.*)/);
+      room.acceptAnswer(_currentOfferId,`#sdp=${m?decodeURIComponent(m[1]):raw}`);
+      addChatLog('system','Answer applied...');
+      ($('manual-answer-input') as HTMLInputElement).value = '';
+    };
   }
-});
 
-// ── Event Bindings (HMR-safe via window flag) ──
-
-if (!(window as any).__p2pBound) {
-  (window as any).__p2pBound = true;
-
-  ($('create-room-btn') as HTMLButtonElement).addEventListener('click', createRoom);
-  ($('chat-send-btn') as HTMLButtonElement).addEventListener('click', sendChat);
-  ($('chat-input') as HTMLInputElement).addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendChat();
+  r.onMessage((data,peerId)=>{
+    if(!(data instanceof Uint8Array)) return;
+    const d=decodeMessage(data);
+    if(d.type==='yjs'){
+      if(ydoc){
+        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update); isRemoteUpdate=false;
+        if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+      }
+      room!.send(data);
+    } else {
+      const sender = peerEmails.get(peerId)||peerId;
+      addChatLog('received',`${sender}: ${d.text}`);
+      room!.send(encodeChat(`${sender}: ${d.text}`));
+    }
   });
 
-  // ── Auto-detect peer mode ──
+  r.onPeerJoin(async peerId=>{
+    connected = true;
+    const peerEmail = _pendingPeerEmail||peerId;
+    peerEmails.set(peerId,peerEmail);
+    allUsers.push({email:peerEmail,isHost:false});
+    _pendingPeerEmail = '';
+    updateTopBar(); broadcastUserList();
+    addChatLog('system',`🎉 ${peerEmail} connected`);
+    if(ydoc){ const s=Y.encodeStateAsUpdate(ydoc); room!.send(encodeYjs(s)); }
+    // Generate new offer for next peer
+    try {
+      const {url:nu,offerId:noi}=await r.offerUrl();
+      _currentOfferId = noi;
+      _shareUrl = useRelay ? `${baseUrl}#room=${roomId}&offer=${noi}&sdp=${encodeURIComponent(nu.match(/#sdp=(.*)/)?.[1]||'')}` : `${baseUrl}#offer=${noi}&sdp=${encodeURIComponent(nu.match(/#sdp=(.*)/)?.[1]||'')}`;
+      ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(_shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
+      if(!useRelay){ ($('manual-answer-input') as HTMLInputElement).style.display = ''; ($('manual-answer-btn') as HTMLButtonElement).style.display = ''; }
+    } catch(err:any){ addChatLog('system',`ERROR: ${err.message}`); }
+  });
+}
+
+let _currentOfferId = '';
+let _shareUrl = '';
+
+function addPendingRequest(email:string, offerId:string){
+  $('pending-section').style.display = 'block';
+  const item = el('div',{class:'pending-item'},[
+    el('span',{},[`🔔 ${email}`]),
+    el('div',{class:'btn-row'},[
+      el('button',{},['Approve']),
+      el('button',{class:'reject-btn'},['Reject']),
+    ]),
+  ]);
+  const [app,rej]=item.querySelectorAll('button');
+  app.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-approve',email,offerId})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
+  rej.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-reject',email})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
+  $('pending-list').appendChild(item);
+}
+
+// ── PEER ──
+function parseRoomFromUrl(){ const h=window.location.hash; if(!h) return null; const m1=h.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/); if(m1) return {roomId:m1[1],offerId:m1[2],offer:decodeURIComponent(m1[3])}; const m2=h.match(/^#offer=([^&]+)&sdp=(.+)$/); if(m2) return {roomId:'',offerId:m2[1],offer:decodeURIComponent(m2[2])}; return null; }
+
+async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
+  const btn=$('create-room-btn') as HTMLButtonElement;
+  if(btn.disabled) return; btn.disabled=true;
+  const email=($('email-input') as HTMLInputElement).value.trim();
+  if(!validateEmail(email)){ addChatLog('system','ERROR: Please enter a valid email'); btn.disabled=false; return; }
+  myEmail=email; ($('email-input') as HTMLInputElement).disabled=true;
+
+  addChatLog('system',`Joining ${roomId||'(manual)'}...`);
+  let useRelay=false;
+  if(roomId){ try{ await Promise.race([wsConnect(),new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),3000))]); useRelay=true; } catch { addChatLog('system','⚠️ Relay unavailable — manual mode'); } }
+
+  const peer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+  const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
+  room = peer;
+  const answerB64 = answerUrl.match(/#sdp=(.*)/)?.[1]||'';
+
+  if(useRelay){
+    ws!.send(JSON.stringify({type:'peer-join-request',room:roomId,offerId,email,answerB64}));
+    addChatLog('system','Waiting for host approval...');
+    ws!.onmessage=e=>{
+      const m=JSON.parse(e.data);
+      if(m.type==='approved'){
+        allUsers=[{email:'Host',isHost:true},{email:myEmail,isHost:false}];
+        connected=true; updateTopBar();
+        ($('open-file-btn') as HTMLButtonElement).style.display='none';
+        ($('save-file-btn') as HTMLButtonElement).disabled=false;
+        initEditor();
+      } else if(m.type==='rejected') addChatLog('system',`❌ Rejected: ${m.message}`);
+    };
+  } else {
+    const answerFullUrl = `${baseUrl}#sdp=${encodeURIComponent(answerB64)}`;
+    ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
+    ($('copy-invite-btn') as HTMLButtonElement).textContent = '📋 Copy answer';
+    ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(answerFullUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
+    allUsers=[{email:'Host',isHost:true},{email:myEmail,isHost:false}];
+    connected=true; updateTopBar();
+    ($('open-file-btn') as HTMLButtonElement).style.display='none';
+    ($('save-file-btn') as HTMLButtonElement).disabled=false;
+    initEditor();
+    addChatLog('system','📋 Copy the answer link & send to host');
+  }
+
+  room.onMessage((data,peerId)=>{
+    if(!(data instanceof Uint8Array)) return;
+    const d=decodeMessage(data);
+    if(d.type==='yjs'){
+      if(ydoc){
+        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update); isRemoteUpdate=false;
+        if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:ytext!.toString()}});
+      }
+    } else {
+      if(d.text.startsWith('[USERS]')){
+        try { const ud=JSON.parse(d.text.slice(7)); if(ud.type==='users'){ allUsers=ud.users; updateTopBar(); } } catch {}
+      } else addChatLog('received',d.text);
+    }
+  });
+}
+
+// ── Bindings ──
+if(!(window as any).__p2pBound){
+  (window as any).__p2pBound = true;
+  ($('create-room-btn') as HTMLButtonElement).addEventListener('click', createRoom);
 
   const parsed = parseRoomFromUrl();
-  if (parsed) {
+  if(parsed){
     ($('create-room-btn') as HTMLButtonElement).textContent = 'Join Room';
-    ($('create-room-btn') as HTMLButtonElement).replaceWith(
-      ($('create-room-btn') as HTMLButtonElement).cloneNode(true)
-    );
-    ($('create-room-btn') as HTMLButtonElement).addEventListener('click', () => {
-      peerAutoJoin(parsed.roomId, parsed.offerId, parsed.offer);
-    });
-    ($('handshake-section') as HTMLElement).style.display = 'none';
+    ($('create-room-btn') as HTMLButtonElement).replaceWith(($('create-room-btn') as HTMLButtonElement).cloneNode(true));
+    ($('create-room-btn') as HTMLButtonElement).addEventListener('click',()=>peerAutoJoin(parsed.roomId,parsed.offerId,parsed.offer));
+    ($('handshake-bar') as HTMLElement).style.display = 'flex';
   }
 }
