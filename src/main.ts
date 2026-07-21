@@ -134,7 +134,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validateEmail(e: string) { return EMAIL_RE.test(e); }
 
 // ── WS Relay ──
-const WS_URL = `ws://${window.location.hostname}:8083`;
+const WS_URL = `${window.location.protocol==='https:'?'wss:':'ws:'}//${window.location.hostname}:8083`;
 let ws: WebSocket|null = null;
 function wsConnect(): Promise<WebSocket> {
   return new Promise((resolve,reject)=>{
@@ -310,8 +310,10 @@ async function createRoom() {
   ($('open-file-btn') as HTMLButtonElement).disabled = false;
   ($('save-file-btn') as HTMLButtonElement).disabled = false;
   initEditor();
-        // Announce email to host
-        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        // Announce email to host after connection is ready
+        setTimeout(() => {
+          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        }, 1000);
 
   if(useRelay){
     ws!.onmessage = e=>{
@@ -434,8 +436,10 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
         ($('open-file-btn') as HTMLButtonElement).style.display='none';
         ($('save-file-btn') as HTMLButtonElement).disabled=false;
         initEditor();
-        // Announce email to host
-        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        // Announce email to host after connection is ready
+        setTimeout(() => {
+          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        }, 1000);
       } else if(m.type==='rejected') addChatLog('system',`❌ Rejected: ${m.message}`);
     };
   } else {
@@ -448,8 +452,10 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     ($('open-file-btn') as HTMLButtonElement).style.display='none';
     ($('save-file-btn') as HTMLButtonElement).disabled=false;
     initEditor();
-        // Announce email to host
-        if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        // Announce email to host after connection is ready
+        setTimeout(() => {
+          if(room && connected) room.send(encodeChat(`[EMAIL]${myEmail}`));
+        }, 1000);
     addChatLog('system','📋 Copy the answer link & send to host');
   }
 
