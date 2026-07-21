@@ -452,17 +452,65 @@ function sendChat() {
   input.value = '';
 }
 
-// ── File System Access ──
+// ── File System Access (with fallback for non-secure contexts) ──
+
+function hasFileSystemAPI(): boolean {
+  return typeof window.showOpenFilePicker === 'function';
+}
+
+// Hidden file input for fallback
+let _fileInput: HTMLInputElement | null = null;
+
+function getFileInput(): HTMLInputElement {
+  if (!_fileInput) {
+    _fileInput = document.createElement('input');
+    _fileInput.type = 'file';
+    _fileInput.accept = '.md';
+    _fileInput.style.display = 'none';
+    document.body.appendChild(_fileInput);
+  }
+  return _fileInput;
+}
+
+function fallbackOpenFile(): Promise<{ name: string; content: string }> {
+  return new Promise((resolve, reject) => {
+    const input = getFileInput();
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      if (!file) return reject(new Error('No file selected'));
+      resolve({ name: file.name, content: await file.text() });
+    };
+    input.click();
+  });
+}
+
+function fallbackSaveFile(content: string, name: string): void {
+  const blob = new Blob([content], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name || 'document.md';
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // Open file — host only
 ($('open-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
   if (!isHost || !ydoc) return;
   try {
-    const [handle] = await window.showOpenFilePicker({
-      types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
-    });
-    fileHandle = handle;
-    const content = await (await handle.getFile()).text();
+    let name: string, content: string;
+    if (hasFileSystemAPI()) {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }],
+      });
+      fileHandle = handle;
+      name = handle.name;
+      content = await (await handle.getFile()).text();
+    } else {
+      const result = await fallbackOpenFile();
+      name = result.name;
+      content = result.content;
+    }
     ydoc!.transact(() => { ytext!.delete(0, ytext!.length); ytext!.insert(0, content); });
     if (editorView) {
       editorView.dispatch({
@@ -470,7 +518,7 @@ function sendChat() {
       });
     }
     updateTopBar();
-    log('system', `📂 Opened: ${handle.name}`);
+    log('system', `📂 Opened: ${name}`);
   } catch (err: any) {
     if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
   }
@@ -480,18 +528,18 @@ function sendChat() {
 ($('save-file-btn') as HTMLButtonElement).addEventListener('click', async () => {
   if (!ytext) return;
   const content = ytext.toString();
-  if (isHost && fileHandle) {
-    // Host: save to already-opened file
-    try {
-      const w = await fileHandle.createWritable();
-      await w.write(content);
-      await w.close();
-      log('system', `💾 Saved: ${fileHandle.name}`);
-    } catch (err: any) {
-      log('system', `ERROR saving: ${err.message}`);
+  if (hasFileSystemAPI()) {
+    if (isHost && fileHandle) {
+      try {
+        const w = await fileHandle.createWritable();
+        await w.write(content);
+        await w.close();
+        log('system', `💾 Saved: ${fileHandle.name}`);
+        return;
+      } catch (err: any) {
+        log('system', `ERROR saving: ${err.message}`);
+      }
     }
-  } else {
-    // Peer or host without file: save-as dialog
     try {
       const handle = await window.showSaveFilePicker({
         suggestedName: fileHandle?.name || 'document.md',
@@ -505,6 +553,10 @@ function sendChat() {
     } catch (err: any) {
       if (err.name !== 'AbortError') log('system', `ERROR: ${err.message}`);
     }
+  } else {
+    // Fallback: download as file
+    fallbackSaveFile(content, fileHandle?.name || 'document.md');
+    log('system', `💾 Downloaded: ${fileHandle?.name || 'document.md'}`);
   }
 });
 
