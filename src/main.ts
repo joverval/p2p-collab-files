@@ -150,6 +150,7 @@ function wsConnect(): Promise<WebSocket> {
 let myEmail = '', isHost = false, connected = false;
 let room: Room|null = null;
 let allUsers: {email:string,isHost:boolean}[] = [];
+let peerEmails: Map<string,string> = new Map();
 let _pendingPeerEmail = '';
 const baseUrl = window.location.href.split('#')[0];
 
