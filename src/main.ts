@@ -256,6 +256,7 @@ async function createRoom() {
           onError: (err: Error) => log('system', `ERROR: ${err.message}`),
         });
         const { url, offerId } = await r.offerUrl();
+        _currentOfferId = offerId;
         room = r;
 
     const sdpB64 = url.match(/#sdp=(.*)/)?.[1] || '';
@@ -305,18 +306,20 @@ async function createRoom() {
       };
     } else {
       // Manual mode: show answer input for host to paste peer's answer
-      $('manual-answer-section').style.display = 'block';
-      $('manual-answer-section').style.display = 'block';
-            ($('manual-answer-btn') as HTMLButtonElement).addEventListener('click', () => {
-              const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
-              if (!raw || !room) return;
-              const match = raw.match(/#sdp=(.*)/);
-              const answerB64 = match ? decodeURIComponent(match[1]) : raw;
-              log('system', `Applying answer for offer ${offerId}...`);
-              room.acceptAnswer(offerId, `#sdp=${answerB64}`);
-              log('system', 'Manual answer applied, waiting for connection...');
-              $('manual-answer-section').style.display = 'none';
-            });
+      function setupManualAnswer() {
+        $('manual-answer-section').style.display = 'block';
+        ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
+          const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
+          if (!raw || !room) return;
+          const match = raw.match(/#sdp=(.*)/);
+          const answerB64 = match ? decodeURIComponent(match[1]) : raw;
+          log('system', `Applying answer for offer ${_currentOfferId}...`);
+          room.acceptAnswer(_currentOfferId, `#sdp=${answerB64}`);
+          log('system', 'Manual answer applied, waiting for connection...');
+          ($('manual-answer-input') as HTMLInputElement).value = '';
+        };
+      }
+      setupManualAnswer();
     }
 
     // Set up room message handling — host broadcasts everything to all peers
@@ -363,6 +366,7 @@ async function createRoom() {
       // Generate new invite link for next peer
       try {
         const { url: newUrl, offerId: newOfferId } = await r.offerUrl();
+        _currentOfferId = newOfferId;
         const newSdpB64 = newUrl.match(/#sdp=(.*)/)?.[1] || '';
         const newShareUrl = useRelay
           ? `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`
@@ -370,6 +374,10 @@ async function createRoom() {
         $('share-url').textContent = newShareUrl;
         $('share-url-size').textContent = `URL segment: ${(newSdpB64.length / 1024).toFixed(1)} KB`;
         log('system', 'New invite link ready for next peer');
+        // In manual mode, show answer input again for next peer
+        if (!useRelay) {
+          $('manual-answer-section').style.display = 'block';
+        }
       } catch (err: any) {
         log('system', `ERROR generating new offer: ${err.message}`);
       }
@@ -383,7 +391,7 @@ async function createRoom() {
   }
 }
 
-let _pendingEmail = '';
+let _currentOfferId = '';  // current pending offer ID for manual mode
 
 // ── PEER ──
 
