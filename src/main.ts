@@ -111,11 +111,54 @@ let fileHandle: FileSystemFileHandle | null = null;
 function updateTopBar() {
   $('topbar').style.display = 'flex';
   $('topbar-filename').textContent = fileHandle ? `📄 ${fileHandle.name}` : '📄 Untitled.md';
-  const users = isHost ? [`[Host] ${myEmail}`, ...connectedUsers] : connectedUsers;
-  $('topbar-users').textContent = users.length
-    ? `👤 ${users.join(', ')}`
-    : '👤 No users connected';
+  $('user-count').textContent = String(connectedUsers.length);
+  // Build dropdown
+  const dd = $('user-dropdown');
+  dd.innerHTML = '';
+  if (isHost) {
+    dd.appendChild(el('div', { class: 'user-dropdown-item host' }, [`[Host] ${myEmail}`]));
+  }
+  for (const u of connectedUsers) {
+    dd.appendChild(el('div', { class: 'user-dropdown-item' }, [u]));
+  }
 }
+
+// ── User dropdown toggle ──
+$('user-counter').addEventListener('click', (e) => {
+  e.stopPropagation();
+  $('user-dropdown').classList.toggle('show');
+});
+document.addEventListener('click', () => {
+  $('user-dropdown').classList.remove('show');
+});
+
+// ── Chat sidebar toggle ──
+let _chatVisible = false;
+function toggleChat() {
+  _chatVisible = !_chatVisible;
+  const sidebar = $('chat-sidebar');
+  const btn = $('chat-toggle') as HTMLButtonElement;
+  if (_chatVisible) {
+    sidebar.classList.remove('chat-sidebar-hidden');
+    btn.classList.add('active');
+  } else {
+    sidebar.classList.add('chat-sidebar-hidden');
+    btn.classList.remove('active');
+  }
+}
+($('chat-toggle') as HTMLButtonElement).addEventListener('click', toggleChat);
+($('chat-close') as HTMLButtonElement).addEventListener('click', toggleChat);
+
+// ── Info modal ──
+($('info-btn') as HTMLButtonElement).addEventListener('click', () => {
+  ($('info-modal') as HTMLElement).style.display = 'flex';
+});
+($('info-close') as HTMLButtonElement).addEventListener('click', () => {
+  ($('info-modal') as HTMLElement).style.display = 'none';
+});
+($('info-modal') as HTMLElement).querySelector('.info-overlay')!.addEventListener('click', () => {
+  ($('info-modal') as HTMLElement).style.display = 'none';
+});
 
 // ── Pending Requests ──
 
@@ -264,23 +307,18 @@ async function createRoom() {
       ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`
       : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
 
-    $('share-url').textContent = shareUrl;
-    $('share-url').classList.remove('empty');
-    $('share-url-size').textContent = `URL segment: ${(sdpB64.length / 1024).toFixed(1)} KB`;
-    $('share-section').style.display = 'block';
-
-    // Click to copy
-    $('share-url').onclick = () => {
-      const url = $('share-url').textContent || '';
-      navigator.clipboard.writeText(url).then(() => {
-        log('system', '📋 URL copied to clipboard');
-      }).catch(() => {
-        log('system', '⚠️ Could not copy — select and copy manually');
-      });
+    // Show simplified handshake: copy button
+    $('handshake-section').style.display = 'block';
+    ($('copy-invite-btn') as HTMLButtonElement).style.display = 'inline-block';
+    ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
+      navigator.clipboard.writeText(shareUrl).then(() => {
+        ($('invite-copied') as HTMLElement).style.display = 'inline';
+        setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
+      }).catch(() => log('system', '⚠️ Could not copy'));
     };
 
     setStatus('connecting', 'waiting for peer');
-    log('system', 'Share the URL above with a peer');
+    log('system', '📋 Copy the invite link and share with a peer');
 
     // Host can start working immediately
     initEditor();
@@ -307,7 +345,7 @@ async function createRoom() {
     } else {
       // Manual mode: show answer input for host to paste peer's answer
       function setupManualAnswer() {
-        $('manual-answer-section').style.display = 'block';
+        $('manual-answer-row').style.display = 'block';
         ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
           const raw = ($('manual-answer-input') as HTMLInputElement).value.trim();
           if (!raw || !room) return;
@@ -371,12 +409,17 @@ async function createRoom() {
         const newShareUrl = useRelay
           ? `${baseUrl}#room=${roomId}&offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`
           : `${baseUrl}#offer=${newOfferId}&sdp=${encodeURIComponent(newSdpB64)}`;
-        $('share-url').textContent = newShareUrl;
-        $('share-url-size').textContent = `URL segment: ${(newSdpB64.length / 1024).toFixed(1)} KB`;
+        // Update copy button with new invite link
+        ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
+          navigator.clipboard.writeText(newShareUrl).then(() => {
+            ($('invite-copied') as HTMLElement).style.display = 'inline';
+            setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
+          }).catch(() => {});
+        };
         log('system', 'New invite link ready for next peer');
         // In manual mode, show answer input again for next peer
         if (!useRelay) {
-          $('manual-answer-section').style.display = 'block';
+          $('manual-answer-row').style.display = 'block';
         }
       } catch (err: any) {
         log('system', `ERROR generating new offer: ${err.message}`);
@@ -481,15 +524,15 @@ async function peerAutoJoin(roomId: string, offerId: string, offerB64: string) {
       }
     };
     } else {
-      // Manual mode: show answer URL for peer to copy and share with host
+      // Manual mode: show copy button for answer URL
       const answerFullUrl = `${baseUrl}#sdp=${encodeURIComponent(answerB64)}`;
-      $('share-url').textContent = answerFullUrl;
-      $('share-url').classList.remove('empty');
-      $('share-url-size').textContent = `Answer URL — copy and send to host`;
-      $('share-section').style.display = 'block';
-      $('share-url').onclick = () => {
+      $('handshake-section').style.display = 'block';
+      ($('copy-invite-btn') as HTMLButtonElement).textContent = '📋 Copy answer link';
+      ($('copy-invite-btn') as HTMLButtonElement).style.display = 'inline-block';
+      ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
         navigator.clipboard.writeText(answerFullUrl).then(() => {
-          log('system', '📋 Answer URL copied — send to host');
+          ($('invite-copied') as HTMLElement).style.display = 'inline';
+          setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000);
         }).catch(() => {});
       };
       setStatus('connected', 'connected — waiting for host to apply answer');
@@ -673,6 +716,6 @@ if (!(window as any).__p2pBound) {
     ($('create-room-btn') as HTMLButtonElement).addEventListener('click', () => {
       peerAutoJoin(parsed.roomId, parsed.offerId, parsed.offer);
     });
-    ($('share-section') as HTMLElement).style.display = 'none';
+    ($('handshake-section') as HTMLElement).style.display = 'none';
   }
 }

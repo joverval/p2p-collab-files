@@ -18,59 +18,73 @@
     <span class="status disconnected" id="main-status">disconnected</span>
   </div>
   <div class="topbar-right">
-    <span id="topbar-users">👤 No users connected</span>
+    <!-- User counter + dropdown -->
+    <div class="user-counter" id="user-counter" title="Connected users">
+      <span>👤</span>
+      <span id="user-count">0</span>
+      <div class="user-dropdown" id="user-dropdown"></div>
+    </div>
+    <!-- Info -->
+    <button class="icon-btn" id="info-btn" title="How it works">ℹ️</button>
+    <!-- Chat toggle -->
+    <button class="icon-btn" id="chat-toggle" title="Toggle chat">💬</button>
   </div>
 </div>
 
-<!-- MAIN CONTENT -->
-<div id="main-content">
+<!-- MAIN CONTENT + CHAT SIDEBAR -->
+<div id="app-layout">
 
-  <!-- Email + Controls -->
-  <div id="controls-bar">
-    <input id="email-input" class="url-input" placeholder="your@email.com" style="max-width:240px;">
-    <button id="create-room-btn">Create Room</button>
-    <span style="color:#8b949e;font-size:12px;">or open a shared URL to join</span>
-  </div>
+  <!-- MAIN CONTENT -->
+  <div id="main-content">
 
-  <!-- Share URL -->
-  <div id="share-section" style="display:none;">
-    <div class="section-label">Share this URL</div>
-    <div class="url-box empty" id="share-url" title="Click to copy">Click "Create Room" to generate</div>
-    <div class="url-size" id="share-url-size"></div>
-  </div>
-
-  <!-- Manual answer (fallback when WS relay unavailable) -->
-  <div id="manual-answer-section" style="display:none;">
-    <div class="section-label">Paste Peer's Answer URL</div>
-    <div class="btn-row">
-      <input class="url-input" id="manual-answer-input" placeholder="Paste answer URL here...">
-      <button id="manual-answer-btn">Apply</button>
+    <!-- Email + Controls -->
+    <div id="controls-bar">
+      <input id="email-input" class="url-input" placeholder="your@email.com" style="max-width:240px;">
+      <button id="create-room-btn">Create Room</button>
+      <span style="color:#8b949e;font-size:12px;">or open a shared URL to join</span>
     </div>
-  </div>
 
-  <!-- Pending requests -->
-  <div id="pending-section" style="display:none;">
-    <div class="section-label">Pending Join Requests</div>
-    <div id="pending-list"></div>
-  </div>
-
-  <!-- Editor -->
-  <div id="editor-section" style="display:none;">
-    <div id="editor-toolbar">
-      <div class="btn-row">
-        <button id="open-file-btn" disabled>📂 Open</button>
-        <button id="save-file-btn" disabled>💾 Save</button>
+    <!-- Handshake: simplified copy/paste -->
+    <div id="handshake-section" style="display:none;">
+      <div class="handshake-row">
+        <button id="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite link</button>
+        <span id="invite-copied" style="display:none;color:#3fb950;font-size:12px;">Copied!</span>
+      </div>
+      <div class="handshake-row" id="manual-answer-row" style="display:none;">
+        <input class="url-input" id="manual-answer-input" placeholder="Paste peer's answer URL...">
+        <button id="manual-answer-btn">Apply</button>
       </div>
     </div>
-    <div id="editor"></div>
+
+    <!-- Pending requests (relay mode) -->
+    <div id="pending-section" style="display:none;">
+      <div class="section-label">Pending Join Requests</div>
+      <div id="pending-list"></div>
+    </div>
+
+    <!-- Editor -->
+    <div id="editor-section" style="display:none;">
+      <div id="editor-toolbar">
+        <div class="btn-row">
+          <button id="open-file-btn" disabled>📂 Open</button>
+          <button id="save-file-btn" disabled>💾 Save</button>
+        </div>
+      </div>
+      <div id="editor"></div>
+    </div>
+
   </div>
 
-  <!-- Chat -->
-  <div id="chat-section">
+  <!-- CHAT SIDEBAR -->
+  <div id="chat-sidebar" class="chat-sidebar-hidden">
+    <div class="chat-sidebar-header">
+      <span>💬 Chat</span>
+      <button class="icon-btn" id="chat-close">✕</button>
+    </div>
     <div class="log" id="chat-log">
       <div class="entry system">Enter your email and click Create Room, or open a shared URL</div>
     </div>
-    <div class="msg-row" style="padding:8px 0 0 0;">
+    <div class="chat-sidebar-input">
       <input id="chat-input" placeholder="Type a message..." disabled>
       <button id="chat-send-btn" disabled>Send</button>
     </div>
@@ -79,5 +93,34 @@
 </div>
 
 <script type="module" src="/src/main.ts"></script>
+
+<!-- INFO MODAL -->
+<div id="info-modal" style="display:none;">
+  <div class="info-overlay"></div>
+  <div class="info-content">
+    <div class="info-header">
+      <span>📖 How it works</span>
+      <button class="icon-btn" id="info-close">✕</button>
+    </div>
+    <div class="info-body">
+      <h3>🖥️ Host</h3>
+      <p>1. Enter your email and click <b>Create Room</b></p>
+      <p>2. Click <b>📋 Copy invite link</b> and share it with peers</p>
+      <p>3. When a peer requests to join, <b>Approve</b> or <b>Reject</b></p>
+      <p>4. If manual mode: paste the peer's answer URL when prompted</p>
+      <hr>
+      <h3>👤 Peer</h3>
+      <p>1. Open the invite link from the host</p>
+      <p>2. Enter your email and click <b>Join Room</b></p>
+      <p>3. Wait for host approval</p>
+      <p>4. If manual mode: click <b>📋 Copy answer link</b> and send it to the host</p>
+      <hr>
+      <h3>📝 Editing</h3>
+      <p>• Click <b>📂 Open</b> (host only) to load a .md file</p>
+      <p>• Click <b>💾 Save</b> to save a local copy</p>
+      <p>• Click <b>💬</b> to open the chat sidebar</p>
+    </div>
+  </div>
+</div>
 </body>
 </html>
