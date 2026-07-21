@@ -50,12 +50,13 @@ body {
   font-family: monospace;
   font-size: 11px;
   word-break: break-all;
-  max-height: 90px;
-  overflow-y: auto;
+  max-height: 40px;
+  overflow: hidden;
   color: #7ee787;
   line-height: 1.4;
+  cursor: pointer;
 }
-.url-box.empty { color: #484f58; }
+.url-box.empty { color: #484f58; cursor: default; }
 
 .url-input {
   background: #0d1117;

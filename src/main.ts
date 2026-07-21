@@ -250,6 +250,16 @@ async function createRoom() {
     $('share-url-size').textContent = `URL segment: ${(sdpB64.length / 1024).toFixed(1)} KB`;
     $('share-section').style.display = 'block';
 
+    // Click to copy — read current URL from element
+    $('share-url').onclick = () => {
+      const url = $('share-url').textContent || '';
+      navigator.clipboard.writeText(url).then(() => {
+        log('system', '📋 URL copied to clipboard');
+      }).catch(() => {
+        log('system', '⚠️ Could not copy — select and copy manually');
+      });
+    };
+
     setStatus('connecting', 'waiting for peer');
     log('system', 'Share the URL above with a peer');
 
