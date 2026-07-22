@@ -557,9 +557,16 @@ function addPendingRequest(email:string, token:string){
     ]),
   ]);
   const [app,rej]=item.querySelectorAll('button');
-  app.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-approve',token})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
-  rej.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-reject',token})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
+  const approve=()=>{ ws!.send(JSON.stringify({type:'host-approve',token})); item.remove(); $('toast').style.display='none'; if(!$('pending-list').children.length) $('pending-section').style.display='none'; };
+  const reject=()=>{ ws!.send(JSON.stringify({type:'host-reject',token})); item.remove(); $('toast').style.display='none'; if(!$('pending-list').children.length) $('pending-section').style.display='none'; };
+  app.addEventListener('click',approve);
+  rej.addEventListener('click',reject);
   $('pending-list').appendChild(item);
+  // Show toast for mobile
+  ($('toast-msg') as HTMLElement).textContent = `🔔 ${email} wants to join`;
+  ($('toast-approve') as HTMLButtonElement).onclick = approve;
+  ($('toast-reject') as HTMLButtonElement).onclick = reject;
+  $('toast').style.display = 'flex';
 }
 
 // ── PEER ──

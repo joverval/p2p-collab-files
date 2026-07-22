@@ -338,6 +338,28 @@ button.reject-btn:hover { background: #f85149; }
 .log-entry.sent { color: #58a6ff; }
 .log-entry.received { color: #3fb950; }
 
+/* ── Toast notification ── */
+#toast {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 500;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  animation: toastIn 0.3s ease;
+  max-width: 90vw;
+}
+@keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(20px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+.toast-btns { display: flex; gap: 8px; }
+#toast-msg { font-size: 14px; color: #58a6ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+
 /* ── CodeMirror dark theme ── */
 .cm-editor { background: #0d1117 !important; }
 .cm-editor .cm-gutters { background: #0d1117 !important; border-right: 1px solid #21262d !important; color: #484f58 !important; }
