@@ -166,6 +166,7 @@ export class SessionController {
     if (useRelay) {
       this.signaling.send({ type: 'submit-answer', token: parsed, email, answerB64 });
       this.signaling.on('approved', () => { this.setConnected?.(true); });
+      this.signaling.on('promotion-request', (m: any) => this.handlePromotionRequest(m));
       this.signaling.on('new-host', async (m: any) => {
         this.onLog?.('system', `🔄 New host: ${m.hostEmail} — reconnecting...`);
         if (this.room) { this.room.close(); this.room = null; }
@@ -203,14 +204,61 @@ export class SessionController {
     this.onLog?.('system', `👑 Promoting ${targetEmail} to host...`);
 
     try {
-      // 1. Send promote-peer to relay
       const ack = await this.signaling.request({ type: 'promote-peer', roomId: this._roomId, targetEmail });
-
-      // 2. Wait for promotion-request on target peer (handled by signaling.on)
-      // 3. Target creates nextRoom, offers for all other peers
-      // This runs on the TARGET peer, not here
+      this.onLog?.('system', '📤 Promotion request sent');
     } catch (err: any) {
       this.onLog?.('system', `❌ Promotion failed: ${err.message}`);
+      this.promotionInProgress = false;
+    }
+  }
+
+  // Called on target peer when receiving promotion-request
+  private async handlePromotionRequest(msg: any) {
+    if (!this.room) return;
+    this.onLog?.('system', `👑 Promotion request from ${msg.oldHostEmail}`);
+
+    // Create nextRoom as host (keep old room open)
+    const rtcConfig = (window as any).__rtcConfig;
+    this.nextRoom = new P2PRoom(true, this._baseUrl, {
+      ...((window as any).__rtcConfig ? { rtcConfig } : {}),
+      onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
+    });
+
+    // Create reconnect offers for ALL participants (including previous host)
+    const reconnectTokens: Record<string, string> = {};
+    for (const p of (msg.participants || [])) {
+      if (p.email === this.getEmail?.()) continue;
+      const { url, offerId } = await this.nextRoom.offerUrl();
+      const sdp = url.match(/#sdp=(.*)/)?.[1] || '';
+      const resp = await this.signaling.request({
+        type: 'store-promotion-offer', roomId: msg.roomId, promotionId: msg.promotionId,
+        intendedEmail: p.email, sdp, offerId,
+      });
+      reconnectTokens[p.email] = resp.token;
+    }
+
+    // Commit
+    try {
+      await this.signaling.request({
+        type: 'commit-promotion', roomId: msg.roomId, promotionId: msg.promotionId,
+        reconnectTokens, requestId: crypto.randomUUID(),
+      });
+      // on promotion-committed, switch role
+      this.signaling.on('promotion-committed', (m: any) => {
+        if (m.promotionId === msg.promotionId) {
+          this.onLog?.('system', '✅ Now hosting the room');
+          if (this.room) this.room.close();
+          this.room = this.nextRoom;
+          this.nextRoom = null;
+          this._roomId = msg.roomId;
+          this.setupRoomHandlers(this.room!, true);
+          this.onRoleChanged?.(true, msg.hostEmail || this.getEmail?.() || '');
+          this.promotionInProgress = false;
+        }
+      });
+    } catch (err: any) {
+      this.onLog?.('system', `❌ Commit failed: ${err.message}`);
+      this.nextRoom?.close(); this.nextRoom = null;
       this.promotionInProgress = false;
     }
   }
