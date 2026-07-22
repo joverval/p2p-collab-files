@@ -35,6 +35,25 @@ body {
 #topbar-filename:hover { border-color: #30363d; }
 #topbar-filename:focus { border-color: #58a6ff; background: #0d1117; }
 .topbar-right { display: flex; align-items: center; gap: 2px; }
+.topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ── Inline Pending (in top bar) ── */
+#pending-section { display: inline-flex; align-items: center; }
+.pending-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #58a6ff;
+  animation: pulse 1.5s infinite;
+}
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+.pending-inline .btn-row { display: inline-flex; gap: 4px; }
+.pending-inline button { padding: 2px 8px; font-size: 12px; }
 
 /* ── Icon Buttons ── */
 .icon-btn {

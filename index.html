@@ -10,13 +10,13 @@
 </head>
 <body>
 
-<!-- TOP BAR -->
+<!-- TOP BAR (all controls + info) -->
 <div id="topbar">
-  <div class="topbar-left">
+
+  <!-- LEFT GROUP: filename + file menu + handshake -->
+  <div class="topbar-group topbar-left">
     <span id="topbar-filename" contenteditable="true">Untitled.md</span>
-  </div>
-  <div class="topbar-right">
-    <!-- File menu -->
+
     <div class="dropdown">
       <button class="icon-btn" id="file-menu-btn" title="File">📂</button>
       <div class="dropdown-menu" id="file-dropdown">
@@ -24,6 +24,23 @@
         <button id="save-file-btn" disabled>💾 Save</button>
         <button id="sync-btn" disabled style="display:none;">🔄 Sync from Host</button>
       </div>
+    </div>
+
+    <input id="email-input" class="compact-input" placeholder="your@email.com">
+    <button id="create-room-btn">Create Room</button>
+    <button id="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite</button>
+    <span id="invite-copied" style="display:none;color:#3fb950;font-size:12px;">Copied!</span>
+    <input id="manual-answer-input" class="compact-input" placeholder="Paste answer..." style="display:none;">
+    <button id="manual-answer-btn" style="display:none;">Apply</button>
+  </div>
+
+  <!-- CENTER: spacer -->
+  <div style="flex:1;"></div>
+
+  <!-- RIGHT GROUP: pending + info + users + chat -->
+  <div class="topbar-group topbar-right">
+    <div id="pending-section" style="display:none;">
+      <div class="pending-inline" id="pending-list"></div>
     </div>
     <button class="icon-btn panel-btn" data-panel="info" title="How it works">ℹ️</button>
     <button class="icon-btn panel-btn" data-panel="users" title="Connected users">
@@ -42,22 +59,6 @@
 
   <!-- MAIN CONTENT -->
   <div id="main-content">
-
-    <!-- Single-line handshake -->
-    <div id="handshake-bar">
-      <input id="email-input" class="compact-input" placeholder="your@email.com">
-      <button id="create-room-btn">Create Room</button>
-      <button id="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite</button>
-      <span id="invite-copied" style="display:none;color:#3fb950;font-size:12px;">Copied!</span>
-      <span id="handshake-spacer" style="flex:1;"></span>
-      <input id="manual-answer-input" class="compact-input" placeholder="Paste answer URL..." style="display:none;">
-      <button id="manual-answer-btn" style="display:none;">Apply</button>
-    </div>
-
-    <!-- Pending requests (relay mode) -->
-    <div id="pending-section" style="display:none;">
-      <div class="pending-item" id="pending-list"></div>
-    </div>
 
     <!-- Editor -->
     <div id="editor-section" style="display:none;">

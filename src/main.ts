@@ -215,7 +215,6 @@ $('sync-btn').addEventListener('click', () => {
 function initEditor() {
   addChatLog('system','📝 Editor ready');
   $('editor-section').style.display = 'flex';
-  $('handshake-bar').style.display = 'flex';
   ydoc = new Y.Doc();
   ytext = ydoc.getText('markdown');
   editorView = new EditorView({
@@ -360,7 +359,6 @@ async function createRoom() {
   const shareUrl = useRelay ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}` : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
   _shareUrl = shareUrl;
 
-  $('handshake-bar').style.display = 'flex';
   ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
   ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
 
@@ -453,9 +451,9 @@ let _currentOfferId = '';
 let _shareUrl = '';
 
 function addPendingRequest(email:string, offerId:string){
-  $('pending-section').style.display = 'block';
-  const item = el('div',{class:'pending-item'},[
-    el('span',{},[`🔔 ${email}`]),
+  $('pending-section').style.display = '';
+  const item = el('div',{class:'pending-inline'},[
+    el('span',{},[`🔔 ${email} wants to join`]),
     el('div',{class:'btn-row'},[
       el('button',{},['Approve']),
       el('button',{class:'reject-btn'},['Reject']),
@@ -574,6 +572,5 @@ if(!(window as any).__p2pBound){
     ($('create-room-btn') as HTMLButtonElement).textContent = 'Join Room';
     ($('create-room-btn') as HTMLButtonElement).replaceWith(($('create-room-btn') as HTMLButtonElement).cloneNode(true));
     ($('create-room-btn') as HTMLButtonElement).addEventListener('click',()=>peerAutoJoin(parsed.roomId,parsed.offerId,parsed.offer));
-    ($('handshake-bar') as HTMLElement).style.display = 'flex';
   }
 }});
