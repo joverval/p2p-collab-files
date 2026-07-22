@@ -54,10 +54,19 @@ document.querySelectorAll('.panel-btn').forEach(btn=>{
 function renderUserPanel(body: HTMLElement) {
   for (const u of allUsers) {
     const role = u.isHost ? 'Host' : `Peer ${allUsers.filter(x=>!x.isHost).indexOf(u)+1}`;
-    body.appendChild(el('div',{class:'user-panel-item'+(u.isHost?' host':'')},[
+    const div = el('div',{class:'user-panel-item'+(u.isHost?' host':'')},[
       el('span',{},[u.email]),
       el('span',{class:'role'},[` — ${role}`]),
-    ]));
+    ]);
+    // Promote button for host to designate successor
+    if(isHost && !u.isHost){
+      div.appendChild(el('button',{class:'promote-btn'},['👑 Promote']));
+      (div.querySelector('.promote-btn') as HTMLButtonElement).addEventListener('click',()=>{
+        room!.send(encodeChat(`[PROMOTE]${u.email}`));
+        addChatLog('system',`👑 Promoted ${u.email} to host`);
+      });
+    }
+    body.appendChild(div);
   }
 }
 
@@ -190,10 +199,21 @@ $('topbar-filename').addEventListener('input', ()=>{
     room.send(encodeChat(`[FILENAME]${name}`));
   }
 });
-
+// Broadcast user list to all peers
 function broadcastUserList() {
   if(!isHost||!room||!connected) return;
   room.send(encodeChat(`[USERS]${JSON.stringify({type:'users',users:allUsers})}`));
+  broadcastRoomState();
+}
+
+// Broadcast room state for host failover
+function broadcastRoomState() {
+  if(!isHost||!room) return;
+  room.send(encodeChat(`[ROOM]${JSON.stringify({
+    token: _token,
+    peers: allUsers,
+    seq: _hostSeq,
+  })}`));
 }
 
 let _emailSent = false;
@@ -445,9 +465,11 @@ async function createRoom() {
       } else if(d.text.startsWith('[CHKSUM]')){
         // background checksum — ignore
       } else if(d.text.startsWith('[FILENAME]')){
-        ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
-        room!.send(encodeChat(d.text)); // forward to other peers
-      } else {
+              ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
+              room!.send(encodeChat(d.text));
+            } else if(d.text.startsWith('[ROOM]')){
+              room!.send(encodeChat(d.text)); // forward to other peers
+            } else if(d.text.startsWith('[PROMOTE]')){
         addChatLog('received',`${sender}: ${d.text}`);
         room!.send(encodeChat(`${sender}: ${d.text}`));
       }
@@ -485,8 +507,46 @@ async function createRoom() {
 
 }
 
+let _token = '';
 let _currentOfferId = '';
 let _shareUrl = '';
+let _roomPeers: {email:string,isHost:boolean}[] = []; // track room state for failover
+
+// ── Host failover ──
+async function becomeHost() {
+  if(isHost) return;
+  addChatLog('system','🔄 Becoming host...');
+  isHost = true;
+  const oldToken = _token;
+  // Disconnect current WebRTC
+  if(room){ room.close(); room=null; connected=false; }
+  // Create new room + offers for each known peer
+  const r = new P2PRoom(true, baseUrl, {
+    onError:e=>addChatLog('system',`ERROR: ${e.message}`),
+  });
+  room = r;
+  allUsers = [{email:myEmail,isHost:true}];
+  // Register as host in relay
+  for(const peerInfo of _roomPeers){
+    if(peerInfo.email === myEmail) continue;
+    if(peerInfo.isHost) continue; // old host
+    const {url,offerId}=await r.offerUrl();
+    const sdpB64 = url.match(/#sdp=(.*)/)?.[1]||'';
+    const tok = await new Promise<string>(resolve=>{
+      ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token') resolve(m.token); };
+      ws!.send(JSON.stringify({type:'store-offer-next',sdp:sdpB64,offerId}));
+    });
+    // Peer will auto-reconnect via new-host notification
+  }
+  // Notify relay to broadcast new host to peers
+  _token = await new Promise<string>(resolve=>{
+    ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token') resolve(m.token); };
+    ws!.send(JSON.stringify({type:'store-offer',sdp:''})); // placeholder token
+  });
+  ws!.send(JSON.stringify({type:'notify-peers', oldToken, newToken:_token, hostEmail:myEmail}));
+  updateTopBar(); broadcastUserList();
+  addChatLog('system','✅ Now hosting the room');
+}
 
 function addPendingRequest(email:string, token:string){
   $('pending-section').style.display = '';
@@ -557,6 +617,30 @@ async function peerAutoJoin(parsed: string){
         ($('save-file-btn') as HTMLButtonElement).disabled=false;
         ($('sync-btn') as HTMLButtonElement).style.display='';
         initEditor();
+        // Listen for host failover notifications
+        ws!.onmessage = (e: MessageEvent) => {
+          const m = JSON.parse(e.data);
+          if(m.type === 'new-host') {
+            addChatLog('system',`🔄 New host: ${m.hostEmail} — reconnecting...`);
+            if(room){ room.close(); room=null; connected=false; }
+            const newPeer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+            // fetch offer from new host's token
+            ws!.send(JSON.stringify({type:'fetch-offer',token:m.token}));
+            ws!.onmessage = async (e2: MessageEvent) => {
+              const m2 = JSON.parse(e2.data);
+              if(m2.type==='offer'){
+                const aUrl = await newPeer.connectToHost(`${baseUrl}#sdp=${m2.sdp}`);
+                room = newPeer;
+                const ab64 = aUrl.match(/#sdp=(.*)/)?.[1]||'';
+                ws!.send(JSON.stringify({type:'submit-answer',token:m.token,email:myEmail,answerB64:ab64}));
+                ws!.onmessage = (e3: MessageEvent) => {
+                  const m3 = JSON.parse(e3.data);
+                  if(m3.type==='approved'){ connected=true; updateTopBar(); }
+                };
+              }
+            };
+          }
+        };
       } else if(m.type==='rejected') addChatLog('system',`❌ Rejected: ${m.message}`);
     };
   } else {
@@ -606,6 +690,11 @@ async function peerAutoJoin(parsed: string){
         try { const ud=JSON.parse(d.text.slice(7)); if(ud.type==='users'){ allUsers=ud.users; updateTopBar(); } } catch {}
       } else if(d.text.startsWith('[FILENAME]')){
         ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
+      } else if(d.text.startsWith('[ROOM]')){
+        try{ const rd=JSON.parse(d.text.slice(5)); _roomPeers=rd.peers; _token=rd.token; }catch{}
+      } else if(d.text.startsWith('[PROMOTE]') && !isHost){
+        addChatLog('system','👑 Promoted to host!');
+        becomeHost();
       } else if(d.text.startsWith('[CHKSUM]')){
         const [seqStr, hash] = d.text.slice(8).split(':');
         if(parseInt(seqStr) !== _peerSeq) {
