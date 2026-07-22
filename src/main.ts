@@ -102,6 +102,8 @@ let _chatLogHTML = '';
 let _unread = 0;
 
 function addChatLog(type: string, text: string) {
+  // Filter out internal protocol messages
+  if(text.startsWith('[CHKSUM]') || text.includes('[CHKSUM]')) return;
   const t = new Date().toLocaleTimeString();
   _chatLogHTML += `<div class="log-entry ${type}">[${t}] ${text}</div>`;
   // Update if panel is open
@@ -388,6 +390,7 @@ async function createRoom() {
       room!.send(data);
     } else {
       const sender = peerEmails.get(peerId)||peerId;
+      // Internal protocol messages — handle silently
       if(d.text.startsWith('[EMAIL]')){
         const peerEmail = d.text.slice(7);
         peerEmails.set(peerId, peerEmail);
@@ -399,6 +402,8 @@ async function createRoom() {
         if(ydoc){
           room!.send(encodeYjs(Y.encodeStateAsUpdate(ydoc), _hostSeq));
         }
+      } else if(d.text.startsWith('[CHKSUM]')){
+        // background checksum — ignore
       } else if(d.text.startsWith('[FILENAME]')){
         ($('topbar-filename') as HTMLElement).textContent = d.text.slice(10);
         room!.send(encodeChat(d.text)); // forward to other peers
