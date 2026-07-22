@@ -7,6 +7,7 @@ export interface CollaborationFeature {
   onPeerJoined?(peerId: string): void;
   onPeerLeft?(peerId: string): void;
   handleFeatureData(data: Uint8Array, peerId?: string): void;
+  handleControlMessage?(message: string): void;
   destroy(): void;
 }
 
