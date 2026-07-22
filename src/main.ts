@@ -449,7 +449,7 @@ async function createRoom() {
   if(useRelay){
     ws!.onmessage = e=>{
       const m=JSON.parse(e.data);
-      if(m.type==='peer-request'){ addChatLog('system',`📩 ${m.email} wants to join`); addPendingRequest(m.email,m.token||''); }
+      if(m.type==='peer-request'){ addChatLog('system',`📩 ${m.email} wants to join`); addPendingRequest(m.email,m.token||'',m.offerId,m.answerB64); }
     };
   } else {
     ($('manual-answer-input') as HTMLInputElement).style.display = '';
@@ -581,7 +581,7 @@ async function becomeHost() {
   addChatLog('system','✅ Now hosting the room');
 }
 
-function addPendingRequest(email:string, token:string){
+function addPendingRequest(email:string, token:string, offerId?:string, answerB64?:string){
   $('pending-section').style.display = '';
   const item = el('div',{class:'pending-inline'},[
     el('span',{},[`🔔 ${email} wants to join`]),
@@ -591,12 +591,19 @@ function addPendingRequest(email:string, token:string){
     ]),
   ]);
   const [app,rej]=item.querySelectorAll('button');
-  const approve=()=>{ ws!.send(JSON.stringify({type:'host-approve',token})); item.remove(); $('toast').style.display='none'; if(!$('pending-list').children.length) $('pending-section').style.display='none'; };
+  const approve=()=>{
+    ws!.send(JSON.stringify({type:'host-approve',token}));
+    if(room && offerId && answerB64){
+      room.acceptAnswer(offerId, `#sdp=${answerB64}`);
+      _pendingPeerEmail = email;
+    }
+    item.remove(); $('toast').style.display='none';
+    if(!$('pending-list').children.length) $('pending-section').style.display='none';
+  };
   const reject=()=>{ ws!.send(JSON.stringify({type:'host-reject',token})); item.remove(); $('toast').style.display='none'; if(!$('pending-list').children.length) $('pending-section').style.display='none'; };
   app.addEventListener('click',approve);
   rej.addEventListener('click',reject);
   $('pending-list').appendChild(item);
-  // Show toast for mobile
   ($('toast-msg') as HTMLElement).textContent = `🔔 ${email} wants to join`;
   ($('toast-approve') as HTMLButtonElement).onclick = approve;
   ($('toast-reject') as HTMLButtonElement).onclick = reject;
