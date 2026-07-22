@@ -1,10 +1,7 @@
-// app.ts — composition root for p2p-collab-files
+// app.ts — composition root
 // Wires together shell controllers + MarkdownFeature
 
-import './styles/base.css';
-import './styles/shell.css';
-import './styles/markdown.css';
-import './styles/responsive.css';
+import './style.css';
 
 import { $ } from './shared/dom';
 import { ChatController } from './shell/chat/chat-controller';
