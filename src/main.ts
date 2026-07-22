@@ -594,8 +594,8 @@ function addPendingRequest(email:string, token:string, offerId?:string, answerB6
   const approve=()=>{
     ws!.send(JSON.stringify({type:'host-approve',token}));
     if(room && offerId && answerB64){
-      room.acceptAnswer(offerId, `#sdp=${answerB64}`);
       _pendingPeerEmail = email;
+      room.acceptAnswer(offerId, `#sdp=${answerB64}`);
     }
     item.remove(); $('toast').style.display='none';
     if(!$('pending-list').children.length) $('pending-section').style.display='none';
