@@ -58,7 +58,6 @@ function renderUserPanel(body: HTMLElement) {
       el('span',{},[u.email]),
       el('span',{class:'role'},[` — ${role}`]),
     ]);
-    // Promote button for host to designate successor
     if(isHost && !u.isHost){
       div.appendChild(el('button',{class:'promote-btn'},['👑 Promote']));
       (div.querySelector('.promote-btn') as HTMLButtonElement).addEventListener('click',()=>{
@@ -68,6 +67,41 @@ function renderUserPanel(body: HTMLElement) {
     }
     body.appendChild(div);
   }
+  // Reconnect button for peers
+  if(!isHost){
+    body.appendChild(el('hr',{style:'border:none;border-top:1px solid #21262d;margin:8px 0'},[]));
+    const btn = el('button',{class:'promote-btn',style:'width:100%'},['🔄 Try Reconnect']);
+    btn.addEventListener('click', async ()=>{
+      addChatLog('system','🔄 Reconnecting...');
+      if(room){ room.close(); room=null; connected=false; }
+      if(_token){
+        realmConnect();
+      } else {
+        addChatLog('system','⚠️ No token available — open invite link again');
+      }
+    });
+    body.appendChild(btn);
+  }
+}
+
+async function realmConnect() {
+  if(!ws||!_token) return;
+  ws.send(JSON.stringify({type:'fetch-offer',token:_token}));
+  ws.onmessage = async (e: MessageEvent) => {
+    const m = JSON.parse(e.data);
+    if(m.type==='offer'){
+      const peer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+      const aUrl = await peer.connectToHost(`${baseUrl}#sdp=${m.sdp}`);
+      room = peer;
+      const ab64 = aUrl.match(/#sdp=(.*)/)?.[1]||'';
+      ws!.send(JSON.stringify({type:'submit-answer',token:_token,email:myEmail,answerB64:ab64}));
+      ws!.onmessage = (e2: MessageEvent) => {
+        const m2 = JSON.parse(e2.data);
+        if(m2.type==='approved'){ connected=true; updateTopBar(); addChatLog('system','✅ Reconnected'); }
+        if(m2.type==='rejected') addChatLog('system','❌ Rejected');
+      };
+    }
+  };
 }
 
 function renderInfoPanel(body: HTMLElement) {
