@@ -1,27 +1,29 @@
 # p2p-collab-files
 
-Real-time collaborative markdown editor built on [`@joverval/p2p-collab`](https://github.com/joverval/p2p-collab). Pure browser-to-browser — no servers, no accounts, no infrastructure.
+Real-time collaborative markdown editor. Browser-to-browser P2P using WebRTC and [Yjs](https://github.com/yjs/yjs) CRDT. Built on [`@joverval/p2p-collab`](https://github.com/joverval/p2p-collab).
+
+**Live:** [joverval.cl/p2p-collab-files](https://joverval.cl/p2p-collab-files/)
 
 ## Features
 
-- **P2P connections** via WebRTC data channels — no signaling server
-- **Automatic handshake** via local WebSocket relay (development convenience)
-- **Real-time sync** with [Yjs](https://github.com/yjs/yjs) CRDT
-- **Markdown editing** with [CodeMirror 6](https://codemirror.net/) syntax highlighting
-- **Multi-peer**: host can accept multiple peers simultaneously
-- **File support**: host opens `.md` files from disk, peers can save local copies
-- **Email identification**: each user identifies with an email, shown in chat and user list
-- **Approve/reject**: host must approve each peer before they can join
+- **P2P** — WebRTC data channels, no servers needed
+- **Real-time sync** — Yjs CRDT with CodeMirror 6 editor
+- **Multi-peer** — host can accept unlimited peers
+- **Two modes** — automatic WS relay (dev) or manual copy-paste (prod)
+- **File support** — host opens `.md` files, peers save local copies
+- **Chat** — slide-in sidebar with per-user identification
+- **User list** — see all connected users with emails
+- **Sequence + checksum** — integrity verification with auto-sync on mismatch
+- **Reconnection** — host auto-generates new invite on peer disconnect
 
 ## How it works
 
-1. **Host** enters their email and clicks "Create Room" → gets a shareable URL
-2. **Host** shares the URL with peers (Telegram, email, etc.)
-3. **Peer** opens the URL, enters their email, and requests to join
-4. **Host** approves (or rejects) the peer
-5. Both can now edit the document in real-time and chat
-
-The host is the authoritative source — all edits flow through the host, which broadcasts to all connected peers.
+1. **Host** enters email → Create Room → copies invite link
+2. **Host** shares link with peers (Telegram, email, etc.)
+3. **Peer** opens link → enters email → connects
+4. **Manual mode:** peer copies answer link → sends to host → host pastes it
+5. **Relay mode (dev):** host approves peer → auto-connects
+6. Everyone edits in real-time, chat in sidebar
 
 ## Quick Start
 
@@ -31,68 +33,59 @@ cd p2p-collab-files
 npm install
 ```
 
-Start the WebSocket relay (for automated handshake):
+**Development** (with automatic handshake):
 
 ```bash
-npm run relay
+npm run relay      # WebSocket relay on :8083
+npm run dev        # Vite dev server on :8082
 ```
 
-In another terminal, start the dev server:
+**Production** (GitHub Pages, manual mode):
 
 ```bash
-npm run dev
+npm run build      # outputs to dist/
 ```
 
-Open `http://localhost:8082/` in two browser tabs to test.
-
-> **Note:** The WebSocket relay on port 8083 is a development convenience for automatic SDP exchange. In production, you'd replace this with any out-of-band signaling mechanism (QR codes, clipboard, messaging apps) since the underlying library uses URL-encoded SDP and needs no persistent server.
+The app auto-detects whether the relay is available and falls back to manual copy-paste.
 
 ## Project Structure
 
 ```
-├── index.html          # Single-page app
+├── index.html              # Single-page app
 ├── src/
-│   ├── main.ts         # All app logic (UI, Yjs, CodeMirror, file access)
-│   ├── style.css       # Dark theme styles
-│   └── vite-env.d.ts   # Vite type declarations
+│   ├── main.ts             # All app logic
+│   └── style.css           # Dark theme
 ├── server/
-│   └── ws-relay.js     # WebSocket relay for automatic handshake
+│   └── ws-relay.js         # Dev WebSocket relay
+├── public/vendor/
+│   └── simplepeer.min.js   # simple-peer browser build
 ├── vendor/
-│   ├── simple-peer.js  # simple-peer wrapper for Vite
-│   └── simplepeer.min.js  # simple-peer browser build (CDN)
-├── vite.config.ts      # Vite config (aliases for library + simple-peer)
-└── package.json
+│   └── simple-peer.js      # simple-peer wrapper
+├── vite.config.ts
+└── .github/workflows/deploy.yml
 ```
 
-## Architecture
+## Protocol
 
-```
-┌─────────────────────────────────────────┐
-│              p2p-collab-files            │
-│  ┌──────────┐ ┌──────────┐ ┌─────────┐  │
-│  │CodeMirror│ │   Yjs    │ │  Chat   │  │
-│  │  Editor  │ │  CRDT    │ │   UI    │  │
-│  └────┬─────┘ └────┬─────┘ └────┬────┘  │
-│       │             │            │       │
-│  ┌────┴─────────────┴────────────┴────┐  │
-│  │         Message Framing            │  │
-│  │     (0x00 = chat, 0x01 = Yjs)     │  │
-│  └────────────────┬───────────────────┘  │
-│                   │                      │
-├───────────────────┼──────────────────────┤
-│  @joverval/p2p-collab (library)          │
-│  ┌────────────────┴───────────────────┐  │
-│  │     WebRTC + URL SDP signaling     │  │
-│  └────────────────────────────────────┘  │
-└─────────────────────────────────────────┘
-```
+Messages use a 1-byte prefix:
+- `0x00` — Chat text
+- `0x01` — Yjs CRDT update (includes 2-byte sequence number)
 
-## Dependencies
+Internal protocol messages (hidden from chat):
+- `[USERS]` — User list broadcast
+- `[EMAIL]` — Peer email announcement
+- `[FILENAME]` — Filename sync
+- `[CHKSUM]` — SHA-256 checksum every 10 updates
+- `[SYNC]` — Full state request
 
-- [`@joverval/p2p-collab`](https://github.com/joverval/p2p-collab) — WebRTC P2P transport
-- [CodeMirror 6](https://codemirror.net/) — Code editor
-- [Yjs](https://github.com/yjs/yjs) — CRDT for real-time collaboration
-- [ws](https://github.com/websockets/ws) — WebSocket relay (dev only)
+## Integrity
+
+Every Yjs update carries a monotonically increasing **sequence number**. Every 10 updates, the host broadcasts a **SHA-256 checksum** of the full document. Peers validate both:
+
+| Condition | Action |
+|-----------|--------|
+| Seq mismatch | Sync button turns red |
+| Checksum mismatch | Auto-sync from host |
 
 ## License
 
