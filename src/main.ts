@@ -276,14 +276,30 @@ function broadcastRoomState() {
 function onPeerConnected() {
   connected = true;
   updateTopBar();
-  addChatLog('system','📡 Data channel established');
-  // Start editor on first connect (peer side)
-  if(!isHost && !editorView) {
-    initEditor();
-  }
+  const route = getConnectionRoute();
+  addChatLog('system', `📡 Connected — ${route}`);
+  if(!isHost && !editorView) initEditor();
 }
 
 let _emailSent = false;
+
+// ── Connection route detection ──
+async function getConnectionRoute(): Promise<string> {
+  try {
+    // Access simple-peer's internal RTCPeerConnection
+    const pc = (room as any)?._peer?._pc || (room as any)?._peers?.values().next().value?._pc;
+    if (!pc) return 'Direct P2P';
+    const stats = await pc.getStats();
+    let usingTurn = false;
+    stats.forEach((r: any) => {
+      if (r.type === 'local-candidate' && r.candidateType === 'relay') usingTurn = true;
+      if (r.type === 'remote-candidate' && r.candidateType === 'relay') usingTurn = true;
+    });
+    return usingTurn ? 'TURN relay' : 'Direct P2P';
+  } catch {
+    return 'Direct P2P';
+  }
+}
 
 // ── File dropdown toggle ──
 $('file-menu-btn').addEventListener('click', (e) => {

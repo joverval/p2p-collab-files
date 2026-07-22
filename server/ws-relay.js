@@ -1,31 +1,23 @@
-// p2p-collab WebSocket relay — opaque token handshake
-// v1.2: host failover support — peers keep WS open, notify-peers routing
+// p2p-collab WebSocket relay + HTTP API
+// Opaque token handshake with health/credentials endpoints
 
-import { WebSocketServer } from 'ws';
+import http from 'node:http';
 import crypto from 'node:crypto';
+import { WebSocketServer } from 'ws';
 
-const PORT = 8083;
-const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes
+const PORT = Number(process.env.PORT || 8083);
+const TOKEN_TTL = 5 * 60 * 1000;
+const ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
+const TURN_HOST = process.env.TURN_HOST || 'openrelay.metered.ca';
 
-// token → {
-//   sdp, offerId, hostWs,
-//   peersWs: Set<WebSocket>,  // passive peers (for notification routing)
-//   pendingWs?: WebSocket,    // peer waiting for approval
-//   answerB64?, email?,
-//   created: number
-// }
+// token storage (same as before)
 const tokens = new Map();
-
-// Track role per connection: 'host' | 'peer'
 const roles = new WeakMap();
-
-const wss = new WebSocketServer({ port: PORT });
 
 function genToken() {
   return crypto.randomBytes(18).toString('base64url');
 }
 
-// Cleanup expired tokens every 60s
 setInterval(() => {
   const now = Date.now();
   for (const [token, data] of tokens) {
@@ -36,76 +28,95 @@ setInterval(() => {
   }
 }, 60_000);
 
-wss.on('connection', (ws) => {
+// ── HTTP server ──
+const server = http.createServer((req, res) => {
+  // CORS
+  const origin = req.headers.origin || '';
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Health check
+  if (req.method === 'GET' && req.url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    return;
+  }
+
+  // TURN credentials (static OpenRelay for now; coturn time-limited later)
+  if (req.method === 'GET' && req.url === '/turn-credentials') {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(200);
+    res.end(JSON.stringify({
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+        {
+          urls: [
+            `turn:${TURN_HOST}:80?transport=udp`,
+            `turn:${TURN_HOST}:80?transport=tcp`,
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
+      ],
+      iceTransportPolicy: 'all',
+      iceCandidatePoolSize: 2,
+    }));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('Not Found');
+});
+
+// ── WebSocket server ──
+const wss = new WebSocketServer({ server });
+
+wss.on('connection', (ws) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     switch (msg.type) {
-
-      // ── Host: store SDP offer under a token ──
       case 'store-offer': {
         const token = genToken();
         roles.set(ws, 'host');
-        tokens.set(token, {
-          sdp: msg.sdp,
-          offerId: msg.offerId,
-          hostWs: ws,
-          peersWs: new Set(),
-          created: Date.now(),
-        });
+        tokens.set(token, { sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, peersWs: new Set(), created: Date.now() });
         ws.send(JSON.stringify({ type: 'token', token, offerId: msg.offerId }));
         break;
       }
-
-      // ── Peer: fetch SDP offer by token ──
       case 'fetch-offer': {
         const data = tokens.get(msg.token);
-        if (!data) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Token not found or expired' }));
-          return;
-        }
+        if (!data) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found or expired' })); return; }
         ws.send(JSON.stringify({ type: 'offer', sdp: data.sdp, offerId: data.offerId }));
         break;
       }
-
-      // ── Peer: submit answer to host ──
       case 'submit-answer': {
         const data = tokens.get(msg.token);
-        if (!data) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Token not found' }));
-          return;
-        }
+        if (!data) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found' })); return; }
         roles.set(ws, 'peer');
-        data.answerB64 = msg.answerB64;
-        data.email = msg.email;
-        data.pendingWs = ws;
-        // Track peer for notifications
+        data.answerB64 = msg.answerB64; data.email = msg.email; data.pendingWs = ws;
         data.peersWs.add(ws);
-        // Forward to host
-        data.hostWs.send(JSON.stringify({
-          type: 'peer-request',
-          token: msg.token,
-          email: msg.email,
-          offerId: data.offerId,
-          answerB64: msg.answerB64,
-        }));
+        data.hostWs.send(JSON.stringify({ type: 'peer-request', token: msg.token, email: msg.email, offerId: data.offerId, answerB64: msg.answerB64 }));
         ws.send(JSON.stringify({ type: 'waiting-approval' }));
         break;
       }
-
-      // ── Host: approve peer ──
       case 'host-approve': {
         const data = tokens.get(msg.token);
         if (!data || !data.pendingWs) return;
         data.pendingWs.send(JSON.stringify({ type: 'approved' }));
         data.pendingWs = undefined;
-        // peer WS stays open for failover notifications
         break;
       }
-
-      // ── Host: reject peer ──
       case 'host-reject': {
         const data = tokens.get(msg.token);
         if (!data || !data.pendingWs) return;
@@ -115,73 +126,40 @@ wss.on('connection', (ws) => {
         data.pendingWs = undefined;
         break;
       }
-
-      // ── Peer (becoming host): sends full peer table, relay routes and forgets ──
       case 'become-host': {
         const oldData = tokens.get(msg.oldToken);
-        if (!oldData) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Old token not found' }));
-          return;
-        }
-        // Route new-host to each peer in the table
+        if (!oldData) { ws.send(JSON.stringify({ type: 'error', message: 'Old token not found' })); return; }
         for (const p of (msg.peers || [])) {
           if (p.isHost || p.email === msg.hostEmail) continue;
           const token = msg.peerTokens?.[p.email];
           if (!token) continue;
-          // Find this peer's WS from old token
           for (const pw of oldData.peersWs) {
-            // Send new-host notification with their specific token
-            if (pw.readyState === 1) {
-              pw.send(JSON.stringify({ type: 'new-host', token, hostEmail: msg.hostEmail }));
-            }
+            if (pw.readyState === 1) pw.send(JSON.stringify({ type: 'new-host', token, hostEmail: msg.hostEmail }));
           }
         }
-        // Transfer ownership to new host
-        oldData.hostWs = ws;
-        roles.set(ws, 'host');
-        for (const pw of oldData.peersWs) {
-          pw.close(); // close old passive connections — peers will reconnect
-        }
+        oldData.hostWs = ws; roles.set(ws, 'host');
+        for (const pw of oldData.peersWs) pw.close();
         oldData.peersWs.clear();
         ws.send(JSON.stringify({ type: 'become-ok', token: msg.oldToken }));
         break;
       }
-
-      // ── Host: re-register for multi-peer ──
       case 'store-offer-next': {
         const token = genToken();
-        tokens.set(token, {
-          sdp: msg.sdp,
-          offerId: msg.offerId,
-          hostWs: ws,
-          peersWs: new Set(),
-          created: Date.now(),
-        });
+        tokens.set(token, { sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, peersWs: new Set(), created: Date.now() });
         ws.send(JSON.stringify({ type: 'token', token, offerId: msg.offerId }));
-        break;
-      }
-
-      // ── Peer: keep-alive ping (optional, prevents idle timeout) ──
-      case 'ping': {
-        ws.send(JSON.stringify({ type: 'pong' }));
         break;
       }
     }
   });
 
   ws.on('close', () => {
-    // Clean up: remove from peersWs sets, delete tokens with no host
     for (const [token, data] of tokens) {
       data.peersWs.delete(ws);
-      // If host disconnected and no peers, delete token
-      if (data.hostWs === ws) {
-        data.hostWs = null;
-        if (data.peersWs.size === 0) {
-          tokens.delete(token);
-        }
-      }
+      if (data.hostWs === ws) { data.hostWs = null; if (data.peersWs.size === 0) tokens.delete(token); }
     }
   });
 });
 
-console.log(`WS relay v1.2 listening on :${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Relay v1.3 listening on :${PORT} (HTTP + WS)`);
+});
