@@ -151,7 +151,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function validateEmail(e: string) { return EMAIL_RE.test(e); }
 
 // ── WS Relay ──
-const WS_URL = `${window.location.protocol==='https:'?'wss:':'ws:'}//${window.location.hostname}:8083`;
+const WS_URL = 'wss://relay.joverval.cl';
 let ws: WebSocket|null = null;
 function wsConnect(): Promise<WebSocket> {
   return new Promise((resolve,reject)=>{
