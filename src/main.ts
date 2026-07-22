@@ -364,7 +364,7 @@ $('open-file-btn').addEventListener('click', async ()=>{
     } else {
       const r = await fallbackOpenFile(); name = r.name; c = r.content;
     }
-    ydoc.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,c); });
+    ydoc.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,c); }, FILE_OPEN_ORIGIN);
     if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:c}});
     ($('topbar-filename') as HTMLElement).textContent = name;
     if(room && connected) room.send(encodeChat(`[FILENAME]${name}`));
