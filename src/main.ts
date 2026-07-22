@@ -347,15 +347,13 @@ async function createRoom() {
   updateTopBar();
 
   addChatLog('system','Creating room...');
-  let useRelay = false;
+  let useRelay = false, _token = '';
   try {
     await Promise.race([wsConnect(),new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),3000))]);
     useRelay = true;
   } catch { addChatLog('system','⚠️ Relay unavailable — manual mode'); }
 
-  let roomId = '';
-  if(useRelay){ roomId = await new Promise<string>(r=>{ ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='registered') r(m.room); }; ws!.send(JSON.stringify({type:'host-register'})); }); addChatLog('system',`Room: ${roomId}`); }
-
+  // Generate WebRTC offer
   const r = new P2PRoom(true, baseUrl, {
     onError:e=>addChatLog('system',`ERROR: ${e.message}`),
     onPeerLeave: (peerId: string) => {
@@ -374,13 +372,21 @@ async function createRoom() {
   const {url,offerId} = await r.offerUrl();
   _currentOfferId = offerId;
   room = r;
-
   const sdpB64 = url.match(/#sdp=(.*)/)?.[1]||'';
-  const shareUrl = useRelay ? `${baseUrl}#room=${roomId}&offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}` : `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
-  _shareUrl = shareUrl;
+
+  if(useRelay){
+    // Store offer in relay, get opaque token
+    _token = await new Promise<string>(resolve=>{
+      ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token') resolve(m.token); };
+      ws!.send(JSON.stringify({type:'store-offer', sdp:sdpB64, offerId}));
+    });
+    _shareUrl = `${baseUrl}#${_token}`;
+  } else {
+    _shareUrl = `${baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
+  }
 
   ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
-  ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
+  ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(_shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
 
   ($('open-file-btn') as HTMLButtonElement).disabled = false;
   ($('save-file-btn') as HTMLButtonElement).disabled = false;
@@ -389,8 +395,7 @@ async function createRoom() {
   if(useRelay){
     ws!.onmessage = e=>{
       const m=JSON.parse(e.data);
-      if(m.type==='peer-request'){ addChatLog('system',`📩 ${m.email} wants to join`); addPendingRequest(m.email,m.offerId||''); }
-      else if(m.type==='answer'){ _pendingPeerEmail=m.email||''; room!.acceptAnswer(m.offerId||'',`#sdp=${m.answerB64}`); addChatLog('system','Answer applied...'); }
+      if(m.type==='peer-request'){ addChatLog('system',`📩 ${m.email} wants to join`); addPendingRequest(m.email,m.token||''); }
     };
   } else {
     ($('manual-answer-input') as HTMLInputElement).style.display = '';
@@ -462,9 +467,19 @@ async function createRoom() {
     try {
       const {url:nu,offerId:noi}=await r.offerUrl();
       _currentOfferId = noi;
-      _shareUrl = useRelay ? `${baseUrl}#room=${roomId}&offer=${noi}&sdp=${encodeURIComponent(nu.match(/#sdp=(.*)/)?.[1]||'')}` : `${baseUrl}#offer=${noi}&sdp=${encodeURIComponent(nu.match(/#sdp=(.*)/)?.[1]||'')}`;
+      const nuSdpB64 = nu.match(/#sdp=(.*)/)?.[1]||'';
+      if(useRelay){
+        _token = await new Promise<string>(resolve=>{
+          const tmp=ws!.onmessage; ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token'){ ws!.onmessage=tmp; resolve(m.token); } };
+          ws!.send(JSON.stringify({type:'store-offer-next', sdp:nuSdpB64, offerId:noi}));
+        });
+        _shareUrl = `${baseUrl}#${_token}`;
+      } else {
+        _shareUrl = `${baseUrl}#offer=${noi}&sdp=${encodeURIComponent(nuSdpB64)}`;
+        ($('manual-answer-input') as HTMLInputElement).style.display = '';
+        ($('manual-answer-btn') as HTMLButtonElement).style.display = '';
+      }
       ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(_shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
-      if(!useRelay){ ($('manual-answer-input') as HTMLInputElement).style.display = ''; ($('manual-answer-btn') as HTMLButtonElement).style.display = ''; }
     } catch(err:any){ addChatLog('system',`ERROR: ${err.message}`); }
   });
 
@@ -473,7 +488,7 @@ async function createRoom() {
 let _currentOfferId = '';
 let _shareUrl = '';
 
-function addPendingRequest(email:string, offerId:string){
+function addPendingRequest(email:string, token:string){
   $('pending-section').style.display = '';
   const item = el('div',{class:'pending-inline'},[
     el('span',{},[`🔔 ${email} wants to join`]),
@@ -483,32 +498,55 @@ function addPendingRequest(email:string, offerId:string){
     ]),
   ]);
   const [app,rej]=item.querySelectorAll('button');
-  app.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-approve',email,offerId})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
-  rej.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-reject',email})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
+  app.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-approve',token})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
+  rej.addEventListener('click',()=>{ ws!.send(JSON.stringify({type:'host-reject',token})); item.remove(); if(!$('pending-list').children.length) $('pending-section').style.display='none'; });
   $('pending-list').appendChild(item);
 }
 
 // ── PEER ──
-function parseRoomFromUrl(){ const h=window.location.hash; if(!h) return null; const m1=h.match(/^#room=([^&]+)&offer=([^&]+)&sdp=(.+)$/); if(m1) return {roomId:m1[1],offerId:m1[2],offer:decodeURIComponent(m1[3])}; const m2=h.match(/^#offer=([^&]+)&sdp=(.+)$/); if(m2) return {roomId:'',offerId:m2[1],offer:decodeURIComponent(m2[2])}; return null; }
+function parseRoomFromUrl(): string|null {
+  const h=window.location.hash; if(!h) return null;
+  const m=h.match(/^#([a-z0-9]{12})$/); // opaque token
+  if(m) return m[1];
+  // Legacy manual mode
+  const m2=h.match(/^#offer=([^&]+)&sdp=(.+)$/);
+  if(m2) return `manual:${m2[1]}:${decodeURIComponent(m2[2])}`;
+  return null;
+}
 
-async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
+async function peerAutoJoin(parsed: string){
   const btn=$('create-room-btn') as HTMLButtonElement;
   if(btn.disabled) return; btn.disabled=true;
   const email=($('email-input') as HTMLInputElement).value.trim();
   if(!validateEmail(email)){ addChatLog('system','ERROR: Please enter a valid email'); btn.disabled=false; return; }
   myEmail=email; ($('email-input') as HTMLInputElement).disabled=true;
 
-  addChatLog('system',`Joining ${roomId||'(manual)'}...`);
-  let useRelay=false;
-  if(roomId){ try{ await Promise.race([wsConnect(),new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),3000))]); useRelay=true; } catch { addChatLog('system','⚠️ Relay unavailable — manual mode'); } }
+  let useRelay=false, offerB64='', offerId='';
+  const isToken = !parsed.startsWith('manual:');
+
+  if(isToken){
+    addChatLog('system',`Joining via relay...`);
+    try{ const w=await Promise.race([wsConnect(),new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),5000))]); useRelay=true; } catch { addChatLog('system','⚠️ Relay unavailable — manual mode'); }
+    if(useRelay){
+      const data:any = await new Promise((resolve,reject)=>{
+        ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='offer') resolve(m); if(m.type==='error') reject(new Error(m.message)); };
+        ws!.send(JSON.stringify({type:'fetch-offer',token:parsed}));
+        setTimeout(()=>reject(new Error('timeout')),5000);
+      });
+      offerB64 = data.sdp; offerId = data.offerId;
+    }
+  } else {
+    // Legacy manual mode: "manual:offerId:base64"
+    const parts = parsed.split(':'); offerId=parts[1]; offerB64=parts[2];
+  }
 
   const peer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
   const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
   room = peer;
   const answerB64 = answerUrl.match(/#sdp=(.*)/)?.[1]||'';
 
-  if(useRelay){
-    ws!.send(JSON.stringify({type:'peer-join-request',room:roomId,offerId,email,answerB64}));
+  if(useRelay && isToken){
+    ws!.send(JSON.stringify({type:'submit-answer',token:parsed,email,answerB64}));
     addChatLog('system','Waiting for host approval...');
     ws!.onmessage=e=>{
       const m=JSON.parse(e.data);
@@ -612,6 +650,6 @@ if(!(window as any).__p2pBound){
   if(parsed){
     ($('create-room-btn') as HTMLButtonElement).textContent = 'Join Room';
     ($('create-room-btn') as HTMLButtonElement).replaceWith(($('create-room-btn') as HTMLButtonElement).cloneNode(true));
-    ($('create-room-btn') as HTMLButtonElement).addEventListener('click',()=>peerAutoJoin(parsed.roomId,parsed.offerId,parsed.offer));
+    ($('create-room-btn') as HTMLButtonElement).addEventListener('click',()=>peerAutoJoin(parsed));
   }
 }});
