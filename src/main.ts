@@ -90,14 +90,14 @@ async function realmConnect() {
   ws.onmessage = async (e: MessageEvent) => {
     const m = JSON.parse(e.data);
     if(m.type==='offer'){
-      const peer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+      const peer = new P2PRoom(false, baseUrl, {onConnect:onPeerConnected,onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
       const aUrl = await peer.connectToHost(`${baseUrl}#sdp=${m.sdp}`);
       room = peer;
       const ab64 = aUrl.match(/#sdp=(.*)/)?.[1]||'';
       ws!.send(JSON.stringify({type:'submit-answer',token:_token,email:myEmail,answerB64:ab64}));
       ws!.onmessage = (e2: MessageEvent) => {
         const m2 = JSON.parse(e2.data);
-        if(m2.type==='approved'){ connected=true; updateTopBar(); addChatLog('system','✅ Reconnected'); }
+        if(m2.type==='approved'){  addChatLog('system','✅ Reconnected'); }
         if(m2.type==='rejected') addChatLog('system','❌ Rejected');
       };
     }
@@ -248,6 +248,17 @@ function broadcastRoomState() {
     peers: allUsers,
     seq: _hostSeq,
   })}`));
+}
+
+// Called when peer's data channel actually opens
+function onPeerConnected() {
+  connected = true;
+  updateTopBar();
+  addChatLog('system','📡 Data channel established');
+  // Start editor on first connect (peer side)
+  if(!isHost && !editorView) {
+    initEditor();
+  }
 }
 
 let _emailSent = false;
@@ -613,7 +624,7 @@ function addPendingRequest(email:string, token:string, offerId?:string, answerB6
 // ── PEER ──
 function parseRoomFromUrl(): string|null {
   const h=window.location.hash; if(!h) return null;
-  const m=h.match(/^#([a-z0-9]{12})$/); // opaque token
+  const m=h.match(/^#([a-zA-Z0-9_-]+)$/); // opaque token (base64url)
   if(m) return m[1];
   // Legacy manual mode
   const m2=h.match(/^#offer=([^&]+)&sdp=(.+)$/);
@@ -647,7 +658,7 @@ async function peerAutoJoin(parsed: string){
     const parts = parsed.split(':'); offerId=parts[1]; offerB64=parts[2];
   }
 
-  const peer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+  const peer = new P2PRoom(false, baseUrl, {onConnect:onPeerConnected,onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
   const answerUrl = await peer.connectToHost(`${baseUrl}#sdp=${offerB64}`);
   room = peer;
   const answerB64 = answerUrl.match(/#sdp=(.*)/)?.[1]||'';
@@ -659,18 +670,18 @@ async function peerAutoJoin(parsed: string){
       const m=JSON.parse(e.data);
       if(m.type==='approved'){
         allUsers=[{email:'Host',isHost:true},{email:myEmail,isHost:false}];
-        connected=true; updateTopBar();
+        
         ($('open-file-btn') as HTMLButtonElement).style.display='none';
         ($('save-file-btn') as HTMLButtonElement).disabled=false;
         ($('sync-btn') as HTMLButtonElement).style.display='';
-        initEditor();
+        // Editor starts when data channel opens (onConnect)
         // Listen for host failover notifications
         ws!.onmessage = (e: MessageEvent) => {
           const m = JSON.parse(e.data);
           if(m.type === 'new-host') {
             addChatLog('system',`🔄 New host: ${m.hostEmail} — reconnecting...`);
             if(room){ room.close(); room=null; connected=false; }
-            const newPeer = new P2PRoom(false, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+            const newPeer = new P2PRoom(false, baseUrl, {onConnect:onPeerConnected,onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
             // fetch offer from new host's token
             ws!.send(JSON.stringify({type:'fetch-offer',token:m.token}));
             ws!.onmessage = async (e2: MessageEvent) => {
@@ -682,7 +693,7 @@ async function peerAutoJoin(parsed: string){
                 ws!.send(JSON.stringify({type:'submit-answer',token:m.token,email:myEmail,answerB64:ab64}));
                 ws!.onmessage = (e3: MessageEvent) => {
                   const m3 = JSON.parse(e3.data);
-                  if(m3.type==='approved'){ connected=true; updateTopBar(); }
+                  if(m3.type==='approved'){  }
                 };
               }
             };
@@ -696,7 +707,7 @@ async function peerAutoJoin(parsed: string){
     ($('copy-invite-btn') as HTMLButtonElement).textContent = '📋 Copy answer';
     ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(answerFullUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
     allUsers=[{email:'Host',isHost:true},{email:myEmail,isHost:false}];
-    connected=true; updateTopBar();
+    
     ($('open-file-btn') as HTMLButtonElement).style.display='none';
     ($('save-file-btn') as HTMLButtonElement).disabled=false;
     initEditor();

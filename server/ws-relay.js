@@ -2,6 +2,7 @@
 // v1.2: host failover support — peers keep WS open, notify-peers routing
 
 import { WebSocketServer } from 'ws';
+import crypto from 'node:crypto';
 
 const PORT = 8083;
 const TOKEN_TTL = 5 * 60 * 1000; // 5 minutes
@@ -21,10 +22,7 @@ const roles = new WeakMap();
 const wss = new WebSocketServer({ port: PORT });
 
 function genToken() {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let t = '';
-  for (let i = 0; i < 12; i++) t += chars[Math.floor(Math.random() * chars.length)];
-  return t;
+  return crypto.randomBytes(18).toString('base64url');
 }
 
 // Cleanup expired tokens every 60s
