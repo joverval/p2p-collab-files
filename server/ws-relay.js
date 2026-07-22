@@ -118,27 +118,34 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      // ── Peer (becoming host): notify all peers on old token ──
-      case 'notify-peers': {
-        const data = tokens.get(msg.oldToken);
-        if (!data) {
+      // ── Peer (becoming host): sends full peer table, relay routes and forgets ──
+      case 'become-host': {
+        const oldData = tokens.get(msg.oldToken);
+        if (!oldData) {
           ws.send(JSON.stringify({ type: 'error', message: 'Old token not found' }));
           return;
         }
-        // Broadcast new-host to all passive peers
-        for (const pw of data.peersWs) {
-          if (pw !== ws && pw.readyState === 1) {
-            pw.send(JSON.stringify({
-              type: 'new-host',
-              token: msg.newToken,
-              hostEmail: msg.hostEmail,
-            }));
+        // Route new-host to each peer in the table
+        for (const p of (msg.peers || [])) {
+          if (p.isHost || p.email === msg.hostEmail) continue;
+          const token = msg.peerTokens?.[p.email];
+          if (!token) continue;
+          // Find this peer's WS from old token
+          for (const pw of oldData.peersWs) {
+            // Send new-host notification with their specific token
+            if (pw.readyState === 1) {
+              pw.send(JSON.stringify({ type: 'new-host', token, hostEmail: msg.hostEmail }));
+            }
           }
         }
-        // Transfer host ownership
-        data.hostWs = ws;
+        // Transfer ownership to new host
+        oldData.hostWs = ws;
         roles.set(ws, 'host');
-        ws.send(JSON.stringify({ type: 'notify-ok', count: data.peersWs.size }));
+        for (const pw of oldData.peersWs) {
+          pw.close(); // close old passive connections — peers will reconnect
+        }
+        oldData.peersWs.clear();
+        ws.send(JSON.stringify({ type: 'become-ok', token: msg.oldToken }));
         break;
       }
 

@@ -518,32 +518,31 @@ async function becomeHost() {
   addChatLog('system','🔄 Becoming host...');
   isHost = true;
   const oldToken = _token;
-  // Disconnect current WebRTC
+  const oldPeers = [..._roomPeers];
   if(room){ room.close(); room=null; connected=false; }
-  // Create new room + offers for each known peer
-  const r = new P2PRoom(true, baseUrl, {
-    onError:e=>addChatLog('system',`ERROR: ${e.message}`),
-  });
+  const r = new P2PRoom(true, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
   room = r;
   allUsers = [{email:myEmail,isHost:true}];
-  // Register as host in relay
-  for(const peerInfo of _roomPeers){
-    if(peerInfo.email === myEmail) continue;
-    if(peerInfo.isHost) continue; // old host
+  // Generate tokens for each remaining peer
+  const peerTokens: Record<string,string> = {};
+  for(const p of oldPeers){
+    if(p.email===myEmail||p.isHost) continue;
     const {url,offerId}=await r.offerUrl();
-    const sdpB64 = url.match(/#sdp=(.*)/)?.[1]||'';
-    const tok = await new Promise<string>(resolve=>{
-      ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token') resolve(m.token); };
+    const sdpB64=url.match(/#sdp=(.*)/)?.[1]||'';
+    peerTokens[p.email]=await new Promise<string>(resolve=>{
+      ws!.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='token')resolve(m.token);};
       ws!.send(JSON.stringify({type:'store-offer-next',sdp:sdpB64,offerId}));
     });
-    // Peer will auto-reconnect via new-host notification
   }
-  // Notify relay to broadcast new host to peers
-  _token = await new Promise<string>(resolve=>{
-    ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='token') resolve(m.token); };
-    ws!.send(JSON.stringify({type:'store-offer',sdp:''})); // placeholder token
-  });
-  ws!.send(JSON.stringify({type:'notify-peers', oldToken, newToken:_token, hostEmail:myEmail}));
+  // Send full table to relay — relay routes and forgets
+  ws!.send(JSON.stringify({
+    type:'become-host', oldToken, hostEmail:myEmail,
+    peers:oldPeers, peerTokens,
+  }));
+  ws!.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.type==='become-ok'){ _token=m.token; }
+  };
   updateTopBar(); broadcastUserList();
   addChatLog('system','✅ Now hosting the room');
 }
