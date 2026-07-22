@@ -6,8 +6,12 @@ declare const __BUILD_TIME__: string;
 console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
 
 import * as Y from 'yjs';
+import { yCollab } from 'y-codemirror.next';
 import { EditorView, basicSetup } from 'codemirror';
 import { markdown } from '@codemirror/lang-markdown';
+
+const NETWORK_ORIGIN = Symbol('network');
+const FILE_OPEN_ORIGIN = Symbol('file-open');
 
 declare global { interface Window { showOpenFilePicker(o?:any): Promise<FileSystemFileHandle[]>; showSaveFilePicker(o?:any): Promise<FileSystemFileHandle>; } }
 
@@ -216,7 +220,25 @@ const baseUrl = window.location.href.split('#')[0];
 
 // Yjs
 let ydoc: Y.Doc|null = null, ytext: Y.Text|null = null, editorView: EditorView|null = null;
-let isRemoteUpdate = false;
+let undoManager: Y.UndoManager|null = null;
+
+// ── Yjs update batching ──
+const pendingUpdates: Uint8Array[] = [];
+let pendingBytes = 0, flushTimer: any = undefined;
+function enqueueLocalUpdate(update: Uint8Array) {
+  pendingUpdates.push(update);
+  pendingBytes += update.byteLength;
+  if(pendingBytes >= 48*1024 || pendingUpdates.length >= 32) flush();
+  else if(!flushTimer) flushTimer = setTimeout(flush, 20);
+}
+function flush() {
+  clearTimeout(flushTimer); flushTimer = undefined;
+  if(!pendingUpdates.length || !room || !connected) return;
+  const merged = Y.mergeUpdates(pendingUpdates.splice(0));
+  pendingBytes = 0;
+  if(isHost) room.send(encodeYjs(merged));
+  else room.send(encodeYjs(merged));
+}
 
 // File
 let fileHandle: FileSystemFileHandle|null = null;
@@ -278,8 +300,16 @@ $('sync-btn').addEventListener('click', () => {
   }
 });
 // ── Preview ──
+let _previewDirty = false, _previewTimer: any = undefined;
+function schedulePreview() {
+  _previewDirty = true;
+  if(!_previewTimer) _previewTimer = setTimeout(updatePreview, 200);
+}
 function updatePreview() {
-  if(!ytext) return;
+  _previewTimer = undefined;
+  if(!ytext || !_previewDirty) return;
+  _previewDirty = false;
+  if($('preview').classList.contains('view-hidden')) return;
   const md = ytext.toString();
   $('preview').innerHTML = (window as any).marked?.parse(md) || md.replace(/</g,'&lt;');
 }
@@ -288,49 +318,39 @@ function initEditor() {
   addChatLog('system','📝 Editor ready');
   $('editor-section').style.display = 'flex';
   ydoc = new Y.Doc();
-  ytext = ydoc.getText('markdown');
-  editorView = new EditorView({
-    doc: '',
-    extensions: [
-      basicSetup, markdown(),
-      EditorView.lineWrapping,
-      EditorView.updateListener.of((update)=>{
-        if(update.docChanged && !isRemoteUpdate) {
-          const v = update.state.doc.toString();
-          ydoc!.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,v); });
-          // Auto-scroll preview to cursor
-          const cursor = update.state.selection.main.head;
-          const line = update.state.doc.lineAt(cursor);
-          const ratio = line.number / update.state.doc.lines;
-          const p = $('preview');
-          p.scrollTop = ratio * (p.scrollHeight - p.clientHeight);
-        }
-        updatePreview();
-      }),
-      EditorView.theme({
-        '&':{backgroundColor:'#0d1117'},
-        '.cm-gutters':{backgroundColor:'#0d1117',borderRight:'1px solid #21262d',color:'#484f58'},
-        '.cm-activeLineGutter':{backgroundColor:'#161b22'},
-      }),
-    ],
-    parent: $('editor'),
-  });
-  updatePreview(); // initial render
-  ydoc.on('update',(update:Uint8Array)=>{
-    if(isRemoteUpdate) return;
-    if(room && connected) {
-      _hostSeq++;
-      _updateCount++;
-      room.send(encodeYjs(update, _hostSeq));
-      // Send checksum every CHECKSUM_INTERVAL updates
-      if(_updateCount >= CHECKSUM_INTERVAL) {
-        _updateCount = 0;
-        getChecksum().then(hash => {
-          if(room && connected) room.send(encodeChat(`[CHKSUM]${_hostSeq}:${hash}`));
-        });
+  ytext = ydoc.getText('document');
+  undoManager = new Y.UndoManager(ytext);
+
+  const extensions = [
+    basicSetup, markdown(),
+    EditorView.lineWrapping,
+    yCollab(ytext, null, { undoManager }),
+    EditorView.updateListener.of((update)=>{
+      if(update.docChanged){
+        // Auto-scroll preview to cursor
+        const cursor = update.state.selection.main.head;
+        const line = update.state.doc.lineAt(cursor);
+        const p = $('preview');
+        p.scrollTop = (line.number / update.state.doc.lines) * (p.scrollHeight - p.clientHeight);
       }
-    }
+      schedulePreview();
+    }),
+    EditorView.theme({
+      '&':{backgroundColor:'#0d1117'},
+      '.cm-gutters':{backgroundColor:'#0d1117',borderRight:'1px solid #21262d',color:'#484f58'},
+      '.cm-activeLineGutter':{backgroundColor:'#161b22'},
+    }),
+  ];
+
+  editorView = new EditorView({ doc: ytext.toString(), extensions, parent: $('editor') });
+
+  // Only send locally-created updates (not network-applied)
+  ydoc.on('update', (update: Uint8Array, origin: any) => {
+    if(origin === NETWORK_ORIGIN) return;
+    if(room && connected) enqueueLocalUpdate(update);
   });
+
+  schedulePreview();
 }
 
 // ── File System ──
@@ -481,18 +501,18 @@ async function createRoom() {
     if(d.type==='yjs'){
       if(ydoc){
         const savedCursor = editorView ? editorView.state.selection.main.head : 0;
-        isRemoteUpdate=true;
-        Y.applyUpdate(ydoc,d.update);
+        
+        Y.applyUpdate(ydoc, d.update, NETWORK_ORIGIN);
         const newText = ytext!.toString();
         if(editorView && editorView.state.doc.toString() !== newText) {
           editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
         }
-        isRemoteUpdate=false;
+        
         if(editorView && savedCursor <= editorView.state.doc.length) {
           editorView.dispatch({selection:{anchor:savedCursor}});
         }
       }
-      room!.send(data);
+      room!.broadcastExcept(data, peerId);
     } else {
       const sender = peerEmails.get(peerId)||peerId;
       // Internal protocol messages — handle silently
@@ -733,12 +753,12 @@ async function peerAutoJoin(parsed: string){
       }
       _peerSeq = d.seq || _peerSeq;
       if(ydoc){
-        isRemoteUpdate=true; Y.applyUpdate(ydoc,d.update);
+         Y.applyUpdate(ydoc, d.update, NETWORK_ORIGIN);
         const newText = ytext!.toString();
         if(editorView && editorView.state.doc.toString() !== newText) {
           editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
         }
-        isRemoteUpdate=false;
+        
         if(editorView && savedCursor <= editorView.state.doc.length) {
           editorView.dispatch({selection:{anchor:savedCursor}});
         }
