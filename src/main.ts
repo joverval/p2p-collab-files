@@ -410,6 +410,7 @@ async function createRoom() {
     const d=decodeMessage(data);
     if(d.type==='yjs'){
       if(ydoc){
+        const savedCursor = editorView ? editorView.state.selection.main.head : 0;
         isRemoteUpdate=true;
         Y.applyUpdate(ydoc,d.update);
         const newText = ytext!.toString();
@@ -417,8 +418,10 @@ async function createRoom() {
           editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
         }
         isRemoteUpdate=false;
+        if(editorView && savedCursor <= editorView.state.doc.length) {
+          editorView.dispatch({selection:{anchor:savedCursor}});
+        }
       }
-      // Forward to other peers (not back to sender)
       room!.send(data);
     } else {
       const sender = peerEmails.get(peerId)||peerId;
@@ -535,13 +538,14 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     if(!(data instanceof Uint8Array)) return;
     const d=decodeMessage(data);
     if(d.type==='yjs'){
-      // First Yjs update means connection is live — announce email
-      if(!_emailSent && myEmail && !isHost) {
-        _emailSent = true;
-        room!.send(encodeChat(`[EMAIL]${myEmail}`));
-      }
-      // Sequence validation
-      const expectedSeq = _peerSeq + 1;
+          // First Yjs update means connection is live
+          if(!_emailSent && myEmail && !isHost) {
+            _emailSent = true;
+            room!.send(encodeChat(`[EMAIL]${myEmail}`));
+          }
+          const savedCursor = editorView ? editorView.state.selection.main.head : 0;
+          // Sequence validation
+          const expectedSeq = _peerSeq + 1;
       if(d.seq !== 0 && d.seq !== expectedSeq) {
         // Out of sync — highlight sync button
         ($('sync-btn') as HTMLButtonElement).style.background = '#da3633';
@@ -555,6 +559,9 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
           editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:newText}});
         }
         isRemoteUpdate=false;
+        if(editorView && savedCursor <= editorView.state.doc.length) {
+          editorView.dispatch({selection:{anchor:savedCursor}});
+        }
       }
     } else {
       if(d.text.startsWith('[USERS]')){
