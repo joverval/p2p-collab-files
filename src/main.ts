@@ -212,6 +212,13 @@ $('sync-btn').addEventListener('click', () => {
     addChatLog('system','🔄 Requested sync from host');
   }
 });
+// ── Preview ──
+function updatePreview() {
+  if(!ytext) return;
+  const md = ytext.toString();
+  $('preview').innerHTML = (window as any).marked?.parse(md) || md.replace(/</g,'&lt;');
+}
+
 function initEditor() {
   addChatLog('system','📝 Editor ready');
   $('editor-section').style.display = 'flex';
@@ -221,11 +228,13 @@ function initEditor() {
     doc: '',
     extensions: [
       basicSetup, markdown(),
+      EditorView.lineWrapping,
       EditorView.updateListener.of((update)=>{
         if(update.docChanged && !isRemoteUpdate) {
           const v = update.state.doc.toString();
           ydoc!.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,v); });
         }
+        updatePreview();
       }),
       EditorView.theme({
         '&':{backgroundColor:'#0d1117'},
@@ -235,6 +244,7 @@ function initEditor() {
     ],
     parent: $('editor'),
   });
+  updatePreview(); // initial render
   ydoc.on('update',(update:Uint8Array)=>{
     if(isRemoteUpdate) return;
     if(room && connected) {
@@ -564,6 +574,20 @@ async function peerAutoJoin(roomId:string, offerId:string, offerB64:string){
     }
   });
 }
+
+// ── Mobile toggle ──
+$('show-editor-btn').addEventListener('click', ()=>{
+  ($('show-editor-btn') as HTMLButtonElement).classList.add('active');
+  ($('show-preview-btn') as HTMLButtonElement).classList.remove('active');
+  $('editor').classList.remove('view-hidden');
+  $('preview').classList.add('view-hidden');
+});
+$('show-preview-btn').addEventListener('click', ()=>{
+  ($('show-preview-btn') as HTMLButtonElement).classList.add('active');
+  ($('show-editor-btn') as HTMLButtonElement).classList.remove('active');
+  $('preview').classList.remove('view-hidden');
+  $('editor').classList.add('view-hidden');
+});
 
 // ── Bindings ──
 document.addEventListener('DOMContentLoaded', () => {
