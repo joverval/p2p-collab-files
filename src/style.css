@@ -254,7 +254,7 @@ button.reject-btn:hover { background: #f85149; }
   #editor-preview-wrap { flex-direction: column; }
   #editor, #preview { flex: none; height: 50%; border-radius: 6px; border: 1px solid #30363d; }
   #preview { border-top: none; }
-  #right-panel { width: 100vw; max-width: 100vw; }
+  #right-panel { position: fixed; top: 44px; right: 0; bottom: 0; z-index: 150; width: 100vw; max-width: 100vw; }
   #right-panel.panel-hidden { margin-right: -100vw; }
 }
 @media (max-width: 480px) {
@@ -265,6 +265,7 @@ button.reject-btn:hover { background: #f85149; }
   #topbar { padding: 2px 4px; }
   .handshake-btn, #copy-invite-btn { font-size: 11px; padding: 4px 8px; }
   .icon-btn { font-size: 13px; padding: 4px 7px; }
+  #right-panel { top: 36px; }
 }
 
 /* ── Unified Right Panel ── */
@@ -301,13 +302,14 @@ button.reject-btn:hover { background: #f85149; }
 /* Chat inside panel */
 #panel-body .chat-input-row {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   padding-top: 8px;
   border-top: 1px solid #21262d;
   margin-top: 8px;
 }
 #panel-body .chat-input-row input {
   flex: 1;
+  min-width: 0;
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 6px;

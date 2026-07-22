@@ -233,6 +233,12 @@ function initEditor() {
         if(update.docChanged && !isRemoteUpdate) {
           const v = update.state.doc.toString();
           ydoc!.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,v); });
+          // Auto-scroll preview to cursor
+          const cursor = update.state.selection.main.head;
+          const line = update.state.doc.lineAt(cursor);
+          const ratio = line.number / update.state.doc.lines;
+          const p = $('preview');
+          p.scrollTop = ratio * (p.scrollHeight - p.clientHeight);
         }
         updatePreview();
       }),
