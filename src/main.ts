@@ -256,14 +256,18 @@ function initEditor() {
 $('open-file-btn').addEventListener('click', async ()=>{
   if(!isHost||!ydoc) return;
   try {
-    const [h]=await window.showOpenFilePicker({types:[{description:'Markdown',accept:{'text/markdown':['.md']}}]});
-    fileHandle = h;
-    const c=await (await h.getFile()).text();
+    let name:string, c:string;
+    if(hasFileSystemAPI()){
+      const [h]=await window.showOpenFilePicker({types:[{description:'Markdown',accept:{'text/markdown':['.md']}}]});
+      fileHandle = h; name = h.name; c = await (await h.getFile()).text();
+    } else {
+      const r = await fallbackOpenFile(); name = r.name; c = r.content;
+    }
     ydoc.transact(()=>{ ytext!.delete(0,ytext!.length); ytext!.insert(0,c); });
     if(editorView) editorView.dispatch({changes:{from:0,to:editorView.state.doc.length,insert:c}});
-    ($('topbar-filename') as HTMLElement).textContent = h.name;
-    if(room && connected) room.send(encodeChat(`[FILENAME]${h.name}`));
-    addChatLog('system',`📂 Opened: ${h.name}`);
+    ($('topbar-filename') as HTMLElement).textContent = name;
+    if(room && connected) room.send(encodeChat(`[FILENAME]${name}`));
+    addChatLog('system',`📂 Opened: ${name}`);
   } catch(err:any){ if(err.name!=='AbortError') addChatLog('system',`ERROR: ${err.message}`); }
 });
 
