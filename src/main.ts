@@ -337,7 +337,21 @@ async function createRoom() {
   let roomId = '';
   if(useRelay){ roomId = await new Promise<string>(r=>{ ws!.onmessage=e=>{ const m=JSON.parse(e.data); if(m.type==='registered') r(m.room); }; ws!.send(JSON.stringify({type:'host-register'})); }); addChatLog('system',`Room: ${roomId}`); }
 
-  const r = new P2PRoom(true, baseUrl, {onError:e=>addChatLog('system',`ERROR: ${e.message}`)});
+  const r = new P2PRoom(true, baseUrl, {
+    onError:e=>addChatLog('system',`ERROR: ${e.message}`),
+    onPeerLeave: (peerId: string) => {
+      const email = peerEmails.get(peerId) || peerId;
+      allUsers = allUsers.filter(u => u.email !== email);
+      peerEmails.delete(peerId);
+      updateTopBar(); broadcastUserList();
+      addChatLog('system', `👋 ${email} disconnected`);
+      r.offerUrl().then(({url:nu,offerId:noi})=>{
+        _currentOfferId = noi;
+        _shareUrl = `${baseUrl}#offer=${noi}&sdp=${encodeURIComponent(nu.match(/#sdp=(.*)/)?.[1]||'')}`;
+        ($('copy-invite-btn') as HTMLButtonElement).onclick = ()=>{ navigator.clipboard.writeText(_shareUrl).then(()=>{ ($('invite-copied') as HTMLElement).style.display='inline'; setTimeout(()=>($('invite-copied') as HTMLElement).style.display='none',2000); }).catch(()=>{}); };
+      }).catch(()=>{});
+    },
+  });
   const {url,offerId} = await r.offerUrl();
   _currentOfferId = offerId;
   room = r;
@@ -432,6 +446,7 @@ async function createRoom() {
       if(!useRelay){ ($('manual-answer-input') as HTMLInputElement).style.display = ''; ($('manual-answer-btn') as HTMLButtonElement).style.display = ''; }
     } catch(err:any){ addChatLog('system',`ERROR: ${err.message}`); }
   });
+
 }
 
 let _currentOfferId = '';
