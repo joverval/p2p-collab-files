@@ -1,6 +1,7 @@
 node_modules/
 dist/
-*.logTURN_SECRET
+*.log
+TURN_SECRET
 infra/coturn/.env
 infra/coturn/generated-turnserver.conf
 infra/coturn/certs/*.pem
