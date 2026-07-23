@@ -38,7 +38,12 @@ export interface E2EHelpers {
     email: string,
   ): Promise<{ page: Page; context: BrowserContext }>;
 
+  /** Get the CURRENT invite URL from the host page (not a stale snapshot). */
+  getShareUrl(page: Page): Promise<string>;
+
   approvePeer(hostPage: Page, email: string): Promise<void>;
+
+  waitForEditor(page: Page): Promise<void>;
 
   editDocument(page: Page, text: string): Promise<void>;
 
@@ -79,29 +84,32 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       // Wait for invitation UI to appear
       await page.waitForSelector(sel.copyInviteBtn, { timeout: SELECTOR_TIMEOUT });
 
-      // Try clipboard first, then fall back to __P2P_TEST__ API
-      let shareUrl = '';
-      try {
-        shareUrl = await page.evaluate(() => navigator.clipboard.readText());
-      } catch {
-        // Clipboard may not be available; fall back
-      }
-
-      if (!shareUrl) {
-        shareUrl = await page.evaluate(
-          () =>
-            ((window as any).__P2P_TEST__?.getRoomId?.()
-              ? `${window.location.origin}/#${(window as any).__P2P_TEST__.getRoomId()}`
-              : '') as string,
-        );
-      }
-
       // Wait for editor to be visible
       await page.waitForSelector(sel.editor, { timeout: SELECTOR_TIMEOUT });
 
       if (opts?.initialContent) {
         await page.click(sel.editor);
         await page.keyboard.type(opts.initialContent);
+      }
+
+      // Click copy-invite-btn to write shareUrl to clipboard, then read it
+      await page.click(sel.copyInviteBtn);
+
+      let shareUrl = '';
+      try {
+        shareUrl = await page.evaluate(() => navigator.clipboard.readText());
+      } catch {
+        // Clipboard may not be available; fall back to test API
+      }
+
+      if (!shareUrl) {
+        shareUrl = await page.evaluate(
+          () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
+        );
+      }
+
+      if (!shareUrl) {
+        throw new Error('Failed to obtain invite URL from clipboard or test API');
       }
 
       return { page, context, shareUrl };
@@ -113,11 +121,37 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       const page = await context.newPage();
       await page.goto(inviteUrl);
 
+      // Wait for the app to detect the URL hash and re-bind the button
+      // (text changes from "Create Room" → "Join Room" when hash is present).
+      await page.waitForFunction(
+        () => {
+          const btn = document.querySelector('[data-testid="create-room-btn"]') as HTMLButtonElement;
+          return btn?.textContent?.trim() === 'Join Room';
+        },
+        { timeout: SELECTOR_TIMEOUT },
+      );
+
       await page.fill(sel.emailInput, email);
       await page.click(sel.createRoomBtn);
 
-      await page.waitForSelector(sel.editor, { timeout: CONNECTION_TIMEOUT });
+      // Wait for email input to be disabled — signals peerAutoJoin was initiated.
+      await page.waitForFunction(
+        () => {
+          const input = document.querySelector('[data-testid="email-input"]') as HTMLInputElement;
+          return input?.disabled === true;
+        },
+        { timeout: SELECTOR_TIMEOUT },
+      );
+
+      // Do NOT wait for the editor here — it only becomes visible
+      // after the host approves. The caller must wait for it after approving.
       return { page, context };
+    },
+
+    async getShareUrl(page) {
+      return page.evaluate(
+        () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
+      );
     },
 
     async approvePeer(hostPage, email) {
@@ -137,6 +171,13 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       });
     },
 
+    async waitForEditor(page) {
+      await page.waitForSelector(sel.editor, {
+        state: 'visible',
+        timeout: CONNECTION_TIMEOUT,
+      });
+    },
+
     async editDocument(page, text) {
       await page.click(sel.editor);
       await page.keyboard.press('Control+a');
@@ -145,11 +186,11 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
 
     async waitForText(page, expected, options) {
       await page.waitForFunction(
-        ([testid, exp]) => {
-          const el = document.querySelector(`[data-testid="${testid}"]`);
-          return el?.textContent?.includes(exp as string) ?? false;
+        (exp) => {
+          const text = (window as any).__P2P_TEST__?.getText?.() ?? '';
+          return text.includes(exp as string);
         },
-        ['editor', expected],
+        expected,
         { timeout: options?.timeout ?? CONVERGENCE_TIMEOUT },
       );
     },
@@ -176,15 +217,15 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       );
     },
 
-    async promotePeer(hostPage, targetEmail) {
+    async promotePeer(hostPage, _targetEmail) {
       // Open participants panel (data-panel="users" attribute on panel tab)
       await hostPage.click('[data-panel="users"]');
 
-      // Find the row for targetEmail and click its promote button
-      const row = hostPage.locator(sel.participantRow, {
-        hasText: targetEmail,
-      });
-      await row.locator(sel.promoteBtn).click();
+      // Find the first non-host participant (row without 'host' CSS class)
+      // Participant rows show peerId (UUID), not email, so we match by
+      // the presence of a promote button (only non-host rows have one).
+      const promoteBtn = hostPage.locator(sel.promoteBtn).first();
+      await promoteBtn.click();
 
       // Wait for promotion to complete (former host becomes peer)
       await hostPage.waitForFunction(

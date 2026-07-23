@@ -13,6 +13,7 @@ export interface P2PTestAPI {
   getConnectionState(): string;
   getConnectionRoute(): Promise<{ kind: string; local?: string; remote?: string } | null>;
   getRoomId(): string;
+  getShareUrl(): string;
 }
 
 export function exposeTestAPI(deps: {
@@ -58,6 +59,10 @@ export function exposeTestAPI(deps: {
 
     getRoomId(): string {
       return deps.session.roomId;
+    },
+
+    getShareUrl(): string {
+      return deps.session.shareUrl;
     },
   };
 
