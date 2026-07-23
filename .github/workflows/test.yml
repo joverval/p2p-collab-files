@@ -48,6 +48,16 @@ jobs:
         working-directory: app
         run: npx vite build
 
+      - name: Relay smoke test
+        working-directory: app
+        run: |
+          node server/ws-relay.js &
+          RELAY_PID=$!
+          sleep 2
+          curl -sf http://localhost:8083/healthz || { kill $RELAY_PID 2>/dev/null; echo "FAIL: relay didn't start"; exit 1; }
+          kill $RELAY_PID 2>/dev/null
+          echo "PASS: relay healthz OK"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
