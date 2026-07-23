@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install and build library
+        working-directory: lib
+        run: |
+          npm ci
+          npx tsup --no-dts
+
+      - name: Install app
+        working-directory: app
+        run: npm ci
+
+      - name: Build app
+        working-directory: app
+        run: npx vite build
+
+      - name: Type check
+        working-directory: app
+        run: npx tsc --noEmit
