@@ -1,4 +1,6 @@
-// p2p-collab WebSocket relay v2.0 — stable rooms + one-time offers
+// p2p-collab WebSocket relay + HTTP API
+// Opaque token handshake with health/credentials endpoints
+
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
@@ -8,49 +10,75 @@ const TOKEN_TTL = 5 * 60 * 1000;
 const ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
 const TURN_HOST = process.env.TURN_HOST || 'openrelay.metered.ca';
 
-function randomId(bytes) { return crypto.randomBytes(bytes || 18).toString('base64url'); }
-function normEmail(e) { return String(e).trim().toLowerCase(); }
+// token storage (same as before)
+const tokens = new Map();
+const roles = new WeakMap();
 
-const rooms = new Map();
-const offers = new Map();
-const wsMeta = new WeakMap();
+function genToken() {
+  return crypto.randomBytes(18).toString('base64url');
+}
 
 setInterval(() => {
   const now = Date.now();
-  for (const [token, o] of offers) { if (now - o.created > TOKEN_TTL) offers.delete(token); }
-  for (const [roomId, r] of rooms) {
-    if (now - r.lastActivityAt > 30 * 60 * 1000) {
-      for (const [, ws] of r.members) ws.close();
-      rooms.delete(roomId);
+  for (const [token, data] of tokens) {
+    if (now - data.created > TOKEN_TTL) {
+      for (const pw of data.peersWs) pw.close();
+      tokens.delete(token);
     }
   }
 }, 60_000);
 
+// ── HTTP server ──
 const server = http.createServer((req, res) => {
+  // CORS
   const origin = req.headers.origin || '';
-  if (ALLOWED_ORIGINS.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
+  if (ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-  if (req.method === 'GET' && req.url === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, offers: offers.size }));
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
     return;
   }
+
+  // Health check
+  if (req.method === 'GET' && req.url === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', uptime: process.uptime() }));
+    return;
+  }
+
+  // TURN credentials (static OpenRelay for now; coturn time-limited later)
   if (req.method === 'GET' && req.url === '/turn-credentials') {
     res.setHeader('Cache-Control', 'no-store');
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(200);
     res.end(JSON.stringify({
       iceServers: [
         { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
-        { urls: [`turn:${TURN_HOST}:80?transport=udp`, `turn:${TURN_HOST}:80?transport=tcp`], username: 'openrelayproject', credential: 'openrelayproject' },
+        {
+          urls: [
+            `turn:${TURN_HOST}:80?transport=udp`,
+            `turn:${TURN_HOST}:80?transport=tcp`,
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject',
+        },
       ],
-      iceTransportPolicy: 'all', iceCandidatePoolSize: 2,
+      iceTransportPolicy: 'all',
+      iceCandidatePoolSize: 2,
     }));
     return;
   }
-  res.writeHead(404); res.end();
+
+  res.writeHead(404);
+  res.end('Not Found');
 });
 
+// ── WebSocket server ──
 const wss = new WebSocketServer({ server });
 
 wss.on('connection', (ws) => {
@@ -60,114 +88,78 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'store-offer': {
-        const roomId = randomId(), token = randomId();
-        const email = normEmail(msg.hostEmail || 'host');
-        rooms.set(roomId, { roomId, hostEmail: email, hostWs: ws, members: new Map(), pendingPromotion: null, createdAt: Date.now(), lastActivityAt: Date.now() });
-        offers.set(token, { token, roomId, sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, created: Date.now() });
-        wsMeta.set(ws, { roomId, email, isHost: true });
-        ws.send(JSON.stringify({ type: 'token', token, roomId, offerId: msg.offerId, requestId: msg.requestId }));
-        break;
-      }
-      case 'store-offer-next': {
-        const room = rooms.get(msg.roomId);
-        if (!room || room.hostWs !== ws) { ws.send(JSON.stringify({ type: 'error', message: 'Invalid room' })); return; }
-        const token = randomId();
-        offers.set(token, { token, roomId: msg.roomId, sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, intendedEmail: msg.intendedEmail, promotionId: msg.promotionId, created: Date.now() });
-        ws.send(JSON.stringify({ type: 'token', token, roomId: msg.roomId, offerId: msg.offerId, requestId: msg.requestId }));
-        room.lastActivityAt = Date.now();
+        const token = genToken();
+        roles.set(ws, 'host');
+        tokens.set(token, { sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, peersWs: new Set(), created: Date.now() });
+        ws.send(JSON.stringify({ type: 'token', token, offerId: msg.offerId }));
         break;
       }
       case 'fetch-offer': {
-        const o = offers.get(msg.token);
-        if (!o) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found' })); return; }
-        ws.send(JSON.stringify({ type: 'offer', sdp: o.sdp, offerId: o.offerId, roomId: o.roomId, requestId: msg.requestId }));
+        const data = tokens.get(msg.token);
+        if (!data) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found or expired' })); return; }
+        ws.send(JSON.stringify({ type: 'offer', sdp: data.sdp, offerId: data.offerId }));
         break;
       }
       case 'submit-answer': {
-        const o = offers.get(msg.token);
-        if (!o) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found' })); return; }
-        o.answerB64 = msg.answerB64; o.email = msg.email; o.pendingWs = ws;
-        const room = rooms.get(o.roomId);
-        if (room) {
-          room.hostWs.send(JSON.stringify({ type: 'peer-request', token: msg.token, roomId: o.roomId, email: msg.email, offerId: o.offerId, answerB64: msg.answerB64, promotionId: o.promotionId }));
-          room.lastActivityAt = Date.now();
-        }
-        ws.send(JSON.stringify({ type: 'waiting-approval', requestId: msg.requestId }));
+        const data = tokens.get(msg.token);
+        if (!data) { ws.send(JSON.stringify({ type: 'error', message: 'Token not found' })); return; }
+        roles.set(ws, 'peer');
+        data.answerB64 = msg.answerB64; data.email = msg.email; data.pendingWs = ws;
+        data.peersWs.add(ws);
+        data.hostWs.send(JSON.stringify({ type: 'peer-request', token: msg.token, email: msg.email, offerId: data.offerId, answerB64: msg.answerB64 }));
+        ws.send(JSON.stringify({ type: 'waiting-approval' }));
         break;
       }
       case 'host-approve': {
-        const o = offers.get(msg.token);
-        if (!o || !o.pendingWs) return;
-        o.pendingWs.send(JSON.stringify({ type: 'approved', requestId: msg.requestId }));
-        const room = rooms.get(o.roomId);
-        if (room) {
-          room.members.set(normEmail(o.email || o.pendingEmail || ''), o.pendingWs);
-          wsMeta.set(o.pendingWs, { roomId: o.roomId, email: normEmail(o.email || ''), isHost: false });
-          room.lastActivityAt = Date.now();
-        }
-        o.pendingWs = undefined;
+        const data = tokens.get(msg.token);
+        if (!data || !data.pendingWs) return;
+        data.pendingWs.send(JSON.stringify({ type: 'approved' }));
+        data.pendingWs = undefined;
         break;
       }
       case 'host-reject': {
-        const o = offers.get(msg.token);
-        if (!o || !o.pendingWs) return;
-        o.pendingWs.send(JSON.stringify({ type: 'rejected', message: 'Host rejected' }));
-        o.pendingWs.close(); o.pendingWs = undefined;
+        const data = tokens.get(msg.token);
+        if (!data || !data.pendingWs) return;
+        data.pendingWs.send(JSON.stringify({ type: 'rejected', message: 'Host rejected' }));
+        data.peersWs.delete(data.pendingWs);
+        data.pendingWs.close();
+        data.pendingWs = undefined;
         break;
       }
-      case 'promote-peer': {
-        const room = rooms.get(msg.roomId);
-        if (!room || room.hostWs !== ws) { ws.send(JSON.stringify({ type: 'error', message: 'Not host' })); return; }
-        if (room.pendingPromotion) { ws.send(JSON.stringify({ type: 'error', message: 'Promotion in progress' })); return; }
-        const targetEmail = normEmail(msg.targetEmail), targetWs = room.members.get(targetEmail);
-        if (!targetWs) { ws.send(JSON.stringify({ type: 'error', message: 'Target not in room' })); return; }
-        const promotionId = randomId();
-        room.pendingPromotion = { promotionId, oldHostEmail: room.hostEmail, targetEmail, createdAt: Date.now() };
-        targetWs.send(JSON.stringify({ type: 'promotion-request', roomId: msg.roomId, promotionId, oldHostEmail: room.hostEmail, targetEmail,
-          participants: Array.from(room.members.entries()).map(([em]) => ({ email: em, isHost: em === room.hostEmail })),
-        }));
-        ws.send(JSON.stringify({ type: 'promotion-ack', promotionId, requestId: msg.requestId }));
-        room.lastActivityAt = Date.now();
-        break;
-      }
-      case 'store-promotion-offer': {
-        const room = rooms.get(msg.roomId);
-        if (!room || !room.pendingPromotion || room.pendingPromotion.promotionId !== msg.promotionId) { ws.send(JSON.stringify({ type: 'error', message: 'Invalid promotion' })); return; }
-        const token = randomId();
-        offers.set(token, { token, roomId: msg.roomId, sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, intendedEmail: msg.intendedEmail, promotionId: msg.promotionId, created: Date.now() });
-        ws.send(JSON.stringify({ type: 'token', token, roomId: msg.roomId, offerId: msg.offerId, requestId: msg.requestId }));
-        room.lastActivityAt = Date.now();
-        break;
-      }
-      case 'commit-promotion': {
-        const room = rooms.get(msg.roomId);
-        if (!room || !room.pendingPromotion || room.pendingPromotion.promotionId !== msg.promotionId) { ws.send(JSON.stringify({ type: 'error', message: 'Invalid promotion' })); return; }
-        const prom = room.pendingPromotion, tokens = msg.reconnectTokens || {};
-        for (const [email, token] of Object.entries(tokens)) {
-          const o = offers.get(token);
-          if (!o || o.roomId !== msg.roomId || o.promotionId !== msg.promotionId || o.intendedEmail !== email) { ws.send(JSON.stringify({ type: 'error', message: `Token mismatch for ${email}` })); return; }
+      case 'become-host': {
+        const oldData = tokens.get(msg.oldToken);
+        if (!oldData) { ws.send(JSON.stringify({ type: 'error', message: 'Old token not found' })); return; }
+        for (const p of (msg.peers || [])) {
+          if (p.isHost || p.email === msg.hostEmail) continue;
+          const token = msg.peerTokens?.[p.email];
+          if (!token) continue;
+          for (const pw of oldData.peersWs) {
+            if (pw.readyState === 1) pw.send(JSON.stringify({ type: 'new-host', token, hostEmail: msg.hostEmail }));
+          }
         }
-        const oldHostWs = room.hostWs, oldHostEmail = prom.oldHostEmail;
-        room.hostWs = ws; room.hostEmail = prom.targetEmail;
-        room.members.set(oldHostEmail, oldHostWs); room.members.delete(prom.targetEmail);
-        wsMeta.set(ws, { roomId: msg.roomId, email: prom.targetEmail, isHost: true });
-        wsMeta.set(oldHostWs, { roomId: msg.roomId, email: oldHostEmail, isHost: false });
-        for (const [email, token] of Object.entries(tokens)) {
-          const peerWs = room.members.get(email);
-          if (peerWs && peerWs.readyState === WebSocket.OPEN) peerWs.send(JSON.stringify({ type: 'new-host', roomId: msg.roomId, promotionId: msg.promotionId, hostEmail: prom.targetEmail, token }));
-        }
-        ws.send(JSON.stringify({ type: 'promotion-committed', roomId: msg.roomId, promotionId: msg.promotionId, requestId: msg.requestId }));
-        room.pendingPromotion = null; room.lastActivityAt = Date.now();
+        oldData.hostWs = ws; roles.set(ws, 'host');
+        for (const pw of oldData.peersWs) pw.close();
+        oldData.peersWs.clear();
+        ws.send(JSON.stringify({ type: 'become-ok', token: msg.oldToken }));
         break;
       }
-      case 'ping': { ws.send(JSON.stringify({ type: 'pong' })); break; }
+      case 'store-offer-next': {
+        const token = genToken();
+        tokens.set(token, { sdp: msg.sdp, offerId: msg.offerId, hostWs: ws, peersWs: new Set(), created: Date.now() });
+        ws.send(JSON.stringify({ type: 'token', token, offerId: msg.offerId }));
+        break;
+      }
     }
   });
+
   ws.on('close', () => {
-    const meta = wsMeta.get(ws);
-    if (meta) { const room = rooms.get(meta.roomId); if (room) { room.members.delete(meta.email); if (meta.isHost) room.hostWs = null; } }
-    for (const [token, o] of offers) { if (o.hostWs === ws || o.pendingWs === ws) offers.delete(token); }
+    for (const [token, data] of tokens) {
+      data.peersWs.delete(ws);
+      if (data.hostWs === ws) { data.hostWs = null; if (data.peersWs.size === 0) tokens.delete(token); }
+    }
   });
 });
 
-server.listen(PORT, () => console.log(`Relay v2.0 on :${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Relay v1.3 listening on :${PORT} (HTTP + WS)`);
+});
