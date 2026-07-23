@@ -277,7 +277,7 @@ export class SessionController {
   get pendingPeerEmail() { return this._pendingPeerEmail; }
   set pendingPeerEmail(e: string) { this._pendingPeerEmail = e; }
 
-  sendFeature(data: Uint8Array) { this.room?.send(data); }
+  sendFeature(data: Uint8Array) { this.room?.send(encodeYjs(data)); }
   sendControl(msg: string) { this.room?.send(encodeChat(msg)); }
   sendChatMessage(text: string) {
     const prefix = this.getEmail?.() || 'anonymous';
