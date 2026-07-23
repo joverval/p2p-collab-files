@@ -10,7 +10,6 @@ import { WebSocketServer } from 'ws';
 const PORT = Number(process.env.PORT || 8083);
 const TOKEN_TTL = 5 * 60 * 1000;
 const ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
-const TURN_HOST = process.env.TURN_HOST || 'openrelay.metered.ca';
 
 function genToken() {
   return crypto.randomBytes(18).toString('base64url');
@@ -83,12 +82,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(200);
     res.end(JSON.stringify({
       iceServers: [
-        { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
-        {
-          urls: [`turn:${TURN_HOST}:80?transport=udp`, `turn:${TURN_HOST}:80?transport=tcp`],
-          username: 'openrelayproject',
-          credential: 'openrelayproject',
-        },
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        { urls: 'stun:stun.nextcloud.com:3478' },
       ],
       iceTransportPolicy: 'all',
       iceCandidatePoolSize: 2,
