@@ -123,11 +123,11 @@ export class SessionController {
     });
   }
 
-  // ── Host: accept answer (manual) ──
-  acceptAnswer(signalUrl: string) {
+  // ── Host: accept answer (manual or auto with explicit offerId) ──
+  acceptAnswer(signalUrl: string, offerId?: string) {
     const m = signalUrl.match(/#sdp=(.*)/);
     const b64 = m ? decodeURIComponent(m[1]) : signalUrl;
-    this.room?.acceptAnswer(this._currentOfferId, `#sdp=${b64}`);
+    this.room?.acceptAnswer(offerId || this._currentOfferId, `#sdp=${b64}`);
   }
 
   // ── Host: approve / reject ──

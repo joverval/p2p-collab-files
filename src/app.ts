@@ -34,7 +34,7 @@ export function createApplication() {
     ($('toast-approve') as HTMLButtonElement).onclick = () => {
       if (offerId && answerB64) {
         participants.pendingPeerEmail = pEmail;
-        session.acceptAnswer(`#sdp=${answerB64}`);
+        session.acceptAnswer(`#sdp=${answerB64}`, offerId);
       }
       session.approvePeer(token);
       $('toast').style.display = 'none';
