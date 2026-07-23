@@ -1,0 +1,216 @@
+name: Test Suite
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  # ── Job 1: Static analysis + build ──
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install & build library
+        working-directory: lib
+        run: npm ci && npx tsup --no-dts
+
+      - name: Install app
+        working-directory: app
+        run: npm ci
+
+      - name: TypeCheck
+        working-directory: app
+        run: npx tsc --noEmit
+
+      - name: Build app
+        working-directory: app
+        run: npx vite build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: app/dist/
+
+  # ── Job 2: Unit + integration tests (Vitest) ──
+  unit:
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build lib
+        working-directory: lib
+        run: npm ci && npx tsup --no-dts
+
+      - name: Install & test
+        working-directory: app
+        run: |
+          npm ci
+          npx vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=test-results/unit.xml
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: app/coverage/
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-results
+          path: app/test-results/
+
+  # ── Job 3: E2E — direct/STUN path ──
+  e2e-direct:
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build lib
+        working-directory: lib
+        run: npm ci && npx tsup --no-dts
+
+      - name: Install app
+        working-directory: app
+        run: npm ci
+
+      - name: Install Playwright
+        working-directory: app
+        run: npx playwright install chromium --with-deps
+
+      - name: Run E2E (direct)
+        working-directory: app
+        env:
+          VITE_ICE_MODE: stun-only
+          VITE_P2P_TEST_API: 'true'
+        run: |
+          npx start-server-and-test \
+            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_ICE_MODE=stun-only npx vite --port 8082" \
+            "http://localhost:8082" \
+            "npx playwright test --grep '@direct'"
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-direct-failure
+          path: |
+            app/test-results/
+            app/playwright-report/
+
+  # ── Job 4: E2E — TURN path ──
+  e2e-turn:
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      coturn:
+        image: coturn/coturn:4.6
+        ports:
+          - 3478:3478
+          - 3478:3478/udp
+        env:
+          TURN_USER: testuser
+          TURN_PASS: testpass
+          TURN_REALM: localhost
+        options: >-
+          --network=host
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: app
+
+      - uses: actions/checkout@v4
+        with:
+          repository: joverval/p2p-collab
+          path: lib
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build lib
+        working-directory: lib
+        run: npm ci && npx tsup --no-dts
+
+      - name: Install app
+        working-directory: app
+        run: npm ci
+
+      - name: Install Playwright
+        working-directory: app
+        run: npx playwright install chromium --with-deps
+
+      - name: Run E2E (TURN)
+        working-directory: app
+        env:
+          VITE_ICE_MODE: turn-only
+          VITE_P2P_TEST_API: 'true'
+          TURN_HOST: localhost
+          TURN_PORT: '3478'
+          TURN_USER: testuser
+          TURN_PASS: testpass
+          TURN_REALM: localhost
+        run: |
+          npx start-server-and-test \
+            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_ICE_MODE=turn-only npx vite --port 8082" \
+            "http://localhost:8082" \
+            "npx playwright test --grep '@turn'"
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-turn-failure
+          path: |
+            app/test-results/
+            app/playwright-report/

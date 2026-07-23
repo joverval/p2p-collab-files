@@ -1,0 +1,27 @@
+# Docker Compose for local coturn TURN/STUN server
+# Used by CI (e2e-turn job) and developers for local TURN testing.
+#
+# Start:  docker compose -f tests/infra/docker-compose.turn.yml up -d
+# Stop:   docker compose -f tests/infra/docker-compose.turn.yml down
+#
+# Per architecture section 8 / Decision 4.
+
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    environment:
+      - TURN_USER=testuser
+      - TURN_PASS=testpass
+      - TURN_REALM=localhost
+    command: |
+      --log-file=stdout
+      --no-cli
+      --lt-cred-mech
+      --realm=localhost
+      --user=testuser:testpass
+      --no-tls
+      --no-dtls
+      --listening-port=3478
+      --min-port=49152
+      --max-port=49160

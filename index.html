@@ -16,23 +16,23 @@
 
   <!-- LEFT GROUP: filename + file menu + handshake -->
   <div class="topbar-group topbar-left">
-    <span id="topbar-filename" contenteditable="true">Untitled.md</span>
+    <span id="topbar-filename" data-testid="filename" contenteditable="true">Untitled.md</span>
 
     <div class="dropdown">
       <button class="icon-btn" id="file-menu-btn" title="File">📂</button>
       <div class="dropdown-menu" id="file-dropdown">
         <button id="open-file-btn" disabled>📂 Open File</button>
         <button id="save-file-btn" disabled>💾 Save</button>
-        <button id="sync-btn" disabled style="display:none;">🔄 Sync from Host</button>
+        <button id="sync-btn" data-testid="sync-btn" disabled style="display:none;">🔄 Sync from Host</button>
       </div>
     </div>
 
-    <input id="email-input" class="compact-input" placeholder="your@email.com">
-    <button id="create-room-btn">Create Room</button>
-    <button id="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite</button>
+    <input id="email-input" data-testid="email-input" class="compact-input" placeholder="your@email.com">
+    <button id="create-room-btn" data-testid="create-room-btn">Create Room</button>
+    <button id="copy-invite-btn" data-testid="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite</button>
     <span id="invite-copied" style="display:none;color:#3fb950;font-size:12px;">Copied!</span>
-    <input id="manual-answer-input" class="compact-input" placeholder="Paste answer..." style="display:none;">
-    <button id="manual-answer-btn" style="display:none;">Apply</button>
+    <input id="manual-answer-input" data-testid="answer-input" class="compact-input" placeholder="Paste answer..." style="display:none;">
+    <button id="manual-answer-btn" data-testid="apply-answer-btn" style="display:none;">Apply</button>
   </div>
 
   <!-- CENTER: spacer -->
@@ -69,7 +69,7 @@
         <button id="show-preview-btn" class="tab-btn">👁️ Preview</button>
       </div>
       <div id="editor-preview-wrap">
-        <div id="editor"></div>
+        <div id="editor" data-testid="editor"></div>
         <div id="preview"></div>
       </div>
     </div>
@@ -90,12 +90,17 @@
 <script type="module" src="/src/main.ts"></script>
 
 <!-- TOAST for pending requests (mobile-friendly) -->
-<div id="toast" style="display:none;">
+<div id="toast" data-testid="approval-toast" style="display:none;">
   <span id="toast-msg"></span>
   <div class="toast-btns">
-    <button id="toast-approve">Approve</button>
-    <button id="toast-reject" class="reject-btn">Reject</button>
+    <button id="toast-approve" data-testid="approve-btn">Approve</button>
+    <button id="toast-reject" data-testid="reject-btn" class="reject-btn">Reject</button>
   </div>
 </div>
+
+<!-- Hidden diagnostic spans for E2E tests -->
+<span id="connection-route" data-testid="connection-route" style="display:none;"></span>
+<span id="connection-state" data-testid="connection-state" style="display:none;"></span>
+<span id="sync-status" data-testid="sync-status" style="display:none;"></span>
 </body>
 </html>

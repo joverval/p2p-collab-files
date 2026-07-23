@@ -5,6 +5,10 @@ import type { IceConfigProvider } from '../shared/types';
 const WS_URL = import.meta.env.VITE_SIGNAL_WS_URL || 'wss://relay.joverval.cl';
 const HTTP_URL = import.meta.env.VITE_SIGNAL_HTTP_URL || 'https://relay.joverval.cl';
 
+export type WsFactory = (url: string) => WebSocket;
+
+const DEFAULT_WS_FACTORY: WsFactory = (url) => new WebSocket(url);
+
 export class SignalingClient implements IceConfigProvider {
   private ws: WebSocket | null = null;
   private pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: any }>();
@@ -12,6 +16,11 @@ export class SignalingClient implements IceConfigProvider {
   private connected = false;
   private _iceConfig: RTCConfiguration | null = null;
   private _iceConfigExpiry = 0; // epoch ms when credentials expire
+  private wsFactory: WsFactory;
+
+  constructor(wsFactory: WsFactory = DEFAULT_WS_FACTORY) {
+    this.wsFactory = wsFactory;
+  }
 
   /** Validate that an incoming message has required fields for its type. Logs invalid messages. */
   static validateMessage(msg: any): boolean {
@@ -46,7 +55,7 @@ export class SignalingClient implements IceConfigProvider {
 
   connect(timeoutMs = 3000): Promise<void> {
     return new Promise((resolve, reject) => {
-      const s = new WebSocket(WS_URL);
+      const s = this.wsFactory(WS_URL);
       const timer = setTimeout(() => { s.close(); reject(new Error('timeout')); }, timeoutMs);
       s.onopen = () => { clearTimeout(timer); this.ws = s; this.connected = true; resolve(); };
       s.onerror = () => { clearTimeout(timer); reject(new Error('WS connection failed')); };
@@ -57,6 +66,29 @@ export class SignalingClient implements IceConfigProvider {
     });
   }
 
+  /** Apply VITE_ICE_MODE override to an RTCConfiguration. Extracted so it can be used in both relay API and fallback paths. */
+  private applyIceMode(config: RTCConfiguration): RTCConfiguration {
+    const iceMode = (import.meta as any).env?.VITE_ICE_MODE || 'all';
+    if (iceMode === 'stun-only') {
+      config.iceServers = (config.iceServers || [])
+        .map(server => ({
+          ...server,
+          urls: Array.isArray(server.urls)
+            ? server.urls.filter(u => typeof u === 'string' && u.startsWith('stun:'))
+            : (typeof server.urls === 'string' && server.urls.startsWith('stun:') ? server.urls : []),
+        }))
+        .filter(server => {
+          const urls = server.urls;
+          return Array.isArray(urls) ? urls.length > 0 : urls !== '';
+        });
+      config.iceTransportPolicy = 'all';
+    } else if (iceMode === 'turn-only') {
+      config.iceTransportPolicy = 'relay';
+    }
+    // 'all' (default): no modification
+    return config;
+  }
+
   /** Fetch ICE servers from relay HTTP API. Cached — only fetches once per session. Tracks TTL from API response. */
   async fetchIceConfig(): Promise<RTCConfiguration> {
     if (this._iceConfig) return this._iceConfig;
@@ -64,17 +96,18 @@ export class SignalingClient implements IceConfigProvider {
       const resp = await fetch(`${HTTP_URL}/turn-credentials`);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
-      this._iceConfig = {
+      const config: RTCConfiguration = {
         iceServers: data.iceServers || [],
         iceCandidatePoolSize: data.iceCandidatePoolSize ?? 2,
         iceTransportPolicy: (data.iceTransportPolicy as RTCIceTransportPolicy) || 'all',
       };
+      this._iceConfig = this.applyIceMode(config);
       // Track TTL from API response (default 3600s) to support refreshIfNeeded
       const ttlSeconds = data.ttl ?? 3600;
       this._iceConfigExpiry = Date.now() + ttlSeconds * 1000;
     } catch {
       // Fallback if relay API is unavailable — STUN only, no TURN
-      this._iceConfig = {
+      const config: RTCConfiguration = {
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun.cloudflare.com:3478' },
@@ -82,6 +115,7 @@ export class SignalingClient implements IceConfigProvider {
         iceCandidatePoolSize: 2,
         iceTransportPolicy: 'all',
       };
+      this._iceConfig = this.applyIceMode(config);
       this._iceConfigExpiry = Infinity; // STUN-only never expires
     }
     return this._iceConfig;

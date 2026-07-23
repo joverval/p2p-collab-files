@@ -8,6 +8,7 @@ import { ParticipantsController } from './shell/participants/participants-contro
 import { PanelController } from './shell/panels/panel-controller';
 import { SessionController } from './shell/session-controller';
 import { MarkdownFeature } from './features/markdown/markdown-feature';
+import { exposeTestAPI } from './test-api';
 
 declare const __BUILD_TIME__: string;
 console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
@@ -22,6 +23,12 @@ export function createApplication() {
 
   let email = '';
   let editorReady = false;
+
+  // ── Helper for hidden diagnostic spans ──
+  function setTextContent(id: string, text: string) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
 
   // ── Chat send wiring ──
   panel.setSendChat((text: string) => {
@@ -83,6 +90,8 @@ export function createApplication() {
   };
   session.onConnected = (route) => {
     chat.addLog('system', `📡 Connected — ${route}`);
+    setTextContent('connection-route', route);
+    setTextContent('connection-state', 'connected');
     ensureEditorVisible();
   };
   session.onRoleChanged = (host, hostEmail) => {
@@ -191,4 +200,7 @@ export function createApplication() {
       ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
     });
   }
+
+  // ── Expose E2E test API (gated by VITE_P2P_TEST_API) ──
+  exposeTestAPI({ feature, session, isHost: () => isHost });
 }

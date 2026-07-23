@@ -9,9 +9,14 @@
     "preview": "vite preview",
     "relay": "node server/ws-relay.js",
     "typecheck": "tsc --noEmit",
-    "test": "echo 'No tests yet — run: node scripts/test-relay.js'",
-    "test:e2e": "node scripts/test-relay.js",
-    "check": "npm run typecheck && npm run build",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:all": "npm run typecheck && npm run test:unit && npm run build && npm run test:e2e",
+    "check": "npm run test:all",
     "bootstrap": "bash scripts/bootstrap.sh"
   },
   "author": "Joaquín Vergara",
@@ -30,8 +35,13 @@
     "yjs": "^13.6.31"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/dompurify": "^3.0.5",
+    "@vitest/coverage-v8": "^4.1.10",
+    "jsdom": "^29.1.1",
+    "start-server-and-test": "^3.0.11",
     "typescript": "^7.0.2",
-    "vite": "^8.1.5"
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   }
 }

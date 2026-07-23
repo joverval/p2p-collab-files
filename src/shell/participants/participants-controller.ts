@@ -27,15 +27,16 @@ export class ParticipantsController {
     for (const u of this._allUsers) {
       const idx = this._allUsers.filter(x => !x.isHost).indexOf(u);
       const role = u.isHost ? 'Host' : `Peer ${idx >= 0 ? idx + 1 : '?'}`;
-      const div = el('div', { class: 'user-panel-item' + (u.isHost ? ' host' : '') }, [
+      const div = el('div', { class: 'user-panel-item' + (u.isHost ? ' host' : ''), 'data-testid': 'participant-row' }, [
         el('span', {}, [u.email]),
         el('span', { class: 'role' }, [` — ${role}`]),
       ]);
       if (isHost && !u.isHost && this._onPromote) {
-        div.appendChild(el('button', { class: 'promote-btn' }, ['👑 Promote']));
-        (div.querySelector('.promote-btn') as HTMLButtonElement).addEventListener('click', () => {
+        const promoteBtn = el('button', { class: 'promote-btn', 'data-testid': 'promote-btn' }, ['👑 Promote']);
+        promoteBtn.addEventListener('click', () => {
           this._onPromote!(u.email);
         });
+        div.appendChild(promoteBtn);
       }
       body.appendChild(div);
     }
