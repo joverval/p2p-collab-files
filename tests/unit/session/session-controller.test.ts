@@ -226,10 +226,14 @@ describe('D.3 — Connected state changes only from P2P callbacks', () => {
     expect(ctrl.connectionState).toBe('connected');
   });
 
-  it('should go to connected when relay approved event fires', () => {
+  it('should log approval but wait for P2P onConnect to change connectionState', () => {
     const ctrl = new SessionController();
+    let logMsg = '';
+    ctrl.onLog = (_type: string, text: string) => { logMsg = text; };
     fireSignalingEvent('approved', {});
-    expect(ctrl.connectionState).toBe('connected');
+    // approved event triggers log, but connectionState stays idle until actual P2P onConnect
+    expect(logMsg).toContain('Host approved');
+    expect(ctrl.connectionState).toBe('idle');
   });
 });
 

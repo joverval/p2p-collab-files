@@ -3,6 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' https://cdn.jsdelivr.net https://track.joverval.cl;
+    connect-src 'self' ws://localhost:8083 http://localhost:8083 wss://relay.joverval.cl https://track.joverval.cl;
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data:;
+    font-src 'self';
+    media-src 'none';
+    object-src 'none';
+    base-uri 'self';
+    form-action 'none';
+  ">
   <title>p2p-collab-files</title>
   <link rel="stylesheet" href="/src/style.css">
   <script src="/vendor/simplepeer.min.js"></script>

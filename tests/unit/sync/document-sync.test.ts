@@ -387,6 +387,89 @@ describe('Yjs Document Synchronization', () => {
 
   // Extra: NETWORK_ORIGIN prevents echo
   describe('origin filtering', () => {
+
+  // ── B.11: file-open creates exactly one Yjs transaction ──
+  describe('B.11 — File-open creates exactly one transaction', () => {
+    it('FILE_OPEN_ORIGIN produces exactly one update', () => {
+      let updateCount = 0;
+      const doc = createDoc();
+      doc.ydoc.on('update', () => { updateCount++; });
+
+      // Perform a single transact with FILE_OPEN_ORIGIN
+      doc.ydoc.transact(() => {
+        doc.ytext.insert(0, '# File Content\n\nLarge document here.');
+      }, FILE_OPEN_ORIGIN);
+
+      // Should fire exactly one update event (not multiple)
+      expect(updateCount).toBe(1);
+      expect(doc.ytext.toString()).toBe('# File Content\n\nLarge document here.');
+    });
+
+    it('file-open with multiple operations still produces one transaction', () => {
+      let updateCount = 0;
+      const doc = createDoc();
+      doc.ydoc.on('update', () => { updateCount++; });
+
+      doc.ydoc.transact(() => {
+        doc.ytext.insert(0, '# Title\n\n');
+        doc.ytext.insert(doc.ytext.length, 'Paragraph 1.\n');
+        doc.ytext.insert(doc.ytext.length, 'Paragraph 2.\n');
+      }, FILE_OPEN_ORIGIN);
+
+      // All three inserts are in ONE transaction => ONE update
+      expect(updateCount).toBe(1);
+      expect(doc.ytext.toString()).toBe('# Title\n\nParagraph 1.\nParagraph 2.\n');
+    });
+  });
+
+  // ── B.12: remote apply does not create local editor mutation ──
+  describe('B.12 — Remote apply does not create local mutation', () => {
+    it('NETWORK_ORIGIN update does not trigger re-broadcast via local origin', () => {
+      const doc = createDoc();
+      const origins: any[] = [];
+      doc.ydoc.on('update', (_update, origin) => {
+        origins.push(origin);
+      });
+
+      // A local edit (origin = null)
+      doc.ytext.insert(0, 'local');
+
+      // A remote update via NETWORK_ORIGIN
+      const remoteDoc = createDoc();
+      remoteDoc.ytext.insert(0, 'remote content');
+      const remoteUpdate = Y.encodeStateAsUpdate(remoteDoc.ydoc);
+
+      Y.applyUpdate(doc.ydoc, remoteUpdate, NETWORK_ORIGIN);
+
+      // Should have 2 events: local (null) and remote (NETWORK_ORIGIN)
+      expect(origins.length).toBe(2);
+      // First is local (null), second is network
+      expect(origins[0]).toBeNull();
+      expect(origins[1]).toBe(NETWORK_ORIGIN);
+    });
+
+    it('double NETWORK_ORIGIN apply does not create infinite loop', () => {
+      // This tests that applying the same update via NETWORK_ORIGIN
+      // doesn't create cascading updates
+      const doc = createDoc();
+      let updateCount = 0;
+      doc.ydoc.on('update', () => { updateCount++; });
+
+      const remoteDoc = createDoc();
+      remoteDoc.ytext.insert(0, 'remote data');
+      const update = Y.encodeStateAsUpdate(remoteDoc.ydoc);
+
+      // Apply the same update twice via NETWORK_ORIGIN
+      Y.applyUpdate(doc.ydoc, update, NETWORK_ORIGIN);
+      Y.applyUpdate(doc.ydoc, update, NETWORK_ORIGIN);
+
+      // Yjs deduplicates identical updates: second apply is idempotent (no duplicate event)
+      expect(updateCount).toBe(1);
+    });
+  });
+
+  // Extra: NETWORK_ORIGIN prevents echo (moved from above)
+  describe('origin filtering (original)', () => {
     it('NETWORK_ORIGIN distinguishes remote updates from local', () => {
       const origins: any[] = [];
       const doc = createDoc();
@@ -408,5 +491,7 @@ describe('Yjs Document Synchronization', () => {
       expect(origins.length).toBe(2);
       expect(origins[1]).toBe(NETWORK_ORIGIN);
     });
+  });
+
   });
 });

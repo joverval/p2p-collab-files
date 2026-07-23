@@ -26,12 +26,7 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: 'node server/start-relay.js',
-      port: 8083,
-      reuseExistingServer: !process.env.CI,
-    },
-    {
-      command: `VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083 VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=${process.env.VITE_ICE_MODE || 'all'} npx vite --port 8082`,
+      command: `VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=${process.env.VITE_ICE_MODE || 'all'} npx vite --port 8082`,
       port: 8082,
       reuseExistingServer: !process.env.CI,
     },

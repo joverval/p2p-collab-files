@@ -38,6 +38,7 @@ export class SessionController {
   private _processedPromotionIds = new Set<string>();
   private _roomStateVersion = 0;
   private _lastRoomStateVersion = 0;
+  private _nextToken = '';
 
   // Callbacks
   onLog?: (type: string, text: string) => void;
@@ -116,6 +117,7 @@ export class SessionController {
   get roomRef(): Room | null { return this.room; }
   get connectionState(): ConnectionState { return this._connectionState; }
   get isConnected(): boolean { return this._connectionState === 'connected'; }
+  get signalingListenerCount(): number { return this.signaling.listenerCount; }
 
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
@@ -183,7 +185,7 @@ export class SessionController {
           r.broadcastExcept(data);
         }
       }
-    });
+    }
 
     r.onPeerJoin(async (peerId) => {
       const pe = peerId;
@@ -201,6 +203,7 @@ export class SessionController {
         } catch (err: any) { this.onLog?.('system', `ERROR: ${err.message}`); }
       }
     });
+
   }
 
   // ── Host: approve peer (validate, accept answer, signal relay) ──
@@ -210,6 +213,19 @@ export class SessionController {
       this.onLog?.('system', 'ERROR: approvePeer missing required fields');
       return;
     }
+
+    // Kick off pre-generation BEFORE acceptAnswer so it runs during WebRTC negotiation.
+    // By the time onPeerJoin fires, _nextToken is ready for synchronous swap.
+    if (this.room) {
+      const r = this.room;
+      r.offerUrl().then(({ url, offerId }) => {
+        const sdp = url.match(/#sdp=(.*)/)?.[1] || '';
+        return this.signaling.request({ type: 'store-offer-next', roomId: this._roomId, sdp, offerId });
+      }).then(resp => {
+        this._nextToken = resp.token as string;
+      }).catch(err => this.onLog?.('system', `ERROR: ${(err as Error).message}`));
+    }
+
     // 2. Accept the answer with exact offerId
     try {
       this.room?.acceptAnswer(request.offerId, `#sdp=${request.answerB64}`);

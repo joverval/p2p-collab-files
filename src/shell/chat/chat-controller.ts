@@ -3,14 +3,33 @@
 import { $ } from '../../shared/dom';
 import type { ChatMessage } from '../../shared/types';
 
+/** Maximum allowed character length for a chat message. */
+export const CHAT_MAX_LENGTH = 1000;
+
+/** Strip ASCII control characters except tab, newline, and carriage return.
+ *  Also strips Unicode C0/C1 control codes (U+0000-U+001F excluding 09/0A/0D, and U+007F-U+009F). */
+function sanitizeText(text: string): string {
+  return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
+
 export class ChatController {
   private _messages: ChatMessage[] = [];
   private _unread = 0;
 
   get unread(): number { return this._unread; }
+  
+  /** Expose messages for test API (read-only snapshot). */
+  get messages(): ReadonlyArray<ChatMessage> { return this._messages; }
 
-  /** Append a message to the store and render it live if the chat-log element is visible. */
+  /** Append a message to the store and render it live if the chat-log element is visible.
+   *  Text is sanitized (control chars stripped) and truncated to CHAT_MAX_LENGTH. */
   addLog(senderRole: ChatMessage['senderRole'], text: string, senderEmail?: string) {
+    // Strip control chars (XSS vector: null bytes, ANSI escapes, etc.)
+    text = sanitizeText(text);
+    // Truncate to max length
+    if (text.length > CHAT_MAX_LENGTH) text = text.slice(0, CHAT_MAX_LENGTH);
+    if (!text) return;
+
     if (text.startsWith('[CHKSUM]') || text.includes('[CHKSUM]')) return;
     const msg: ChatMessage = {
       id: crypto.randomUUID(),

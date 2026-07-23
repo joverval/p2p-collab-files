@@ -19,16 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: app
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: joverval/p2p-collab
           path: lib
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -39,6 +39,10 @@ jobs:
       - name: Install app
         working-directory: app
         run: npm ci
+
+      - name: Audit
+        working-directory: app
+        run: npm audit --audit-level=high
 
       - name: TypeCheck
         working-directory: app
@@ -59,7 +63,7 @@ jobs:
           echo "PASS: relay healthz OK"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: dist
           path: app/dist/
@@ -70,16 +74,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: app
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: joverval/p2p-collab
           path: lib
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -94,14 +98,14 @@ jobs:
           npx vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=test-results/unit.xml
 
       - name: Upload coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage
           path: app/coverage/
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unit-results
           path: app/test-results/
@@ -112,16 +116,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: app
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: joverval/p2p-collab
           path: lib
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -144,13 +148,13 @@ jobs:
           VITE_P2P_TEST_API: 'true'
         run: |
           npx start-server-and-test \
-            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_ICE_MODE=stun-only npx vite --port 8082" \
+            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=stun-only npx vite --port 8082" \
             "http://localhost:8082" \
             "npx playwright test --grep '@direct'"
 
       - name: Upload artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-direct-failure
           path: |
@@ -175,16 +179,16 @@ jobs:
         options: >-
           --network=host
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: app
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: joverval/p2p-collab
           path: lib
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -212,13 +216,13 @@ jobs:
           TURN_REALM: localhost
         run: |
           npx start-server-and-test \
-            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_ICE_MODE=turn-only npx vite --port 8082" \
+            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=turn-only npx vite --port 8082" \
             "http://localhost:8082" \
             "npx playwright test --grep '@turn'"
 
       - name: Upload artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-turn-failure
           path: |

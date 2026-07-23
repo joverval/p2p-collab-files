@@ -342,6 +342,90 @@ describe('SignalingClient', () => {
 
   // ── C.12 Malformed JSON does not crash ──────────────────────
   describe('C.12 — Malformed JSON does not crash', () => {
+
+  // ── C.13 fetchIceConfig caching and refresh ─────────────────
+  describe('C.13 — fetchIceConfig caches and refreshes near expiry', () => {
+    it('caches ICE config and only re-fetches near expiry', async () => {
+      // Override global fetch for this test
+      let fetchCalls = 0;
+      const originalFetch = (globalThis as any).fetch;
+      (globalThis as any).fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+          iceCandidatePoolSize: 2,
+          iceTransportPolicy: 'all',
+          ttl: 3600,
+        }),
+      });
+
+      try {
+        const { client, lastWs } = createClient();
+        const connPromise = client.connect();
+        lastWs().simulateOpen();
+        await connPromise;
+
+        // First call: should fetch
+        const config1 = await client.fetchIceConfig();
+        expect(config1.iceServers).toBeDefined();
+        expect(config1.iceServers!.length).toBeGreaterThan(0);
+
+        // Second call: should use cache (no fetch)
+        const config2 = await client.fetchIceConfig();
+        expect(config2).toBe(config1); // same reference = cached
+
+        // refreshIfNeeded before expiry: should return cached
+        const config3 = await client.refreshIfNeeded();
+        expect(config3).toBe(config1);
+
+        // Advance time past the refresh threshold (5 min before expiry = 55 min after fetch)
+        // TTL is 3600s, refresh threshold is 300s, so at 3301s it should re-fetch
+        vi.advanceTimersByTime(3301 * 1000);
+
+        // Now refreshIfNeeded should re-fetch (but fetchIceConfig still cached until refreshIfNeeded is called)
+        (globalThis as any).fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            iceServers: [{ urls: 'stun:stun2.l.google.com:19302' }],
+            iceCandidatePoolSize: 2,
+            iceTransportPolicy: 'all',
+            ttl: 3600,
+          }),
+        });
+
+        const config4 = await client.refreshIfNeeded();
+        // Should have re-fetched with new servers
+        const servers = config4.iceServers as { urls: string }[];
+        expect(servers[0].urls).toBe('stun:stun2.l.google.com:19302');
+      } finally {
+        (globalThis as any).fetch = originalFetch;
+      }
+    });
+
+    it('fetchIceConfig falls back to STUN on HTTP failure', async () => {
+      const originalFetch = (globalThis as any).fetch;
+      (globalThis as any).fetch = vi.fn().mockRejectedValue(new Error('Network error'));
+
+      try {
+        const { client, lastWs } = createClient();
+        const connPromise = client.connect();
+        lastWs().simulateOpen();
+        await connPromise;
+
+        const config = await client.fetchIceConfig();
+        // Should have fallback STUN servers
+        expect(config.iceServers).toBeDefined();
+        expect(config.iceServers!.length).toBeGreaterThan(0);
+        const stunUrls = config.iceServers!.map((s: any) => {
+          const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+          return urls.filter((u: string) => u.startsWith('stun:'));
+        }).flat();
+        expect(stunUrls.length).toBeGreaterThan(0);
+      } finally {
+        (globalThis as any).fetch = originalFetch;
+      }
+    });
+  });
     it('invalid JSON in onmessage is caught silently', async () => {
       const { client, lastWs } = createClient();
       const connPromise = client.connect();
@@ -389,6 +473,43 @@ describe('SignalingClient', () => {
       expect(SignalingClient.validateMessage(undefined)).toBe(false);
       expect(SignalingClient.validateMessage('string')).toBe(false);
       expect(SignalingClient.validateMessage(42)).toBe(false);
+    });
+  });
+
+  // ── fetchIceConfig caching (C.11) ──
+  describe('fetchIceConfig caching', () => {
+    it('caches ICE config and only fetches once', async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy;
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ iceServers: [{ urls: 'stun:stun.example.com:3478' }] }),
+      });
+
+      const client = new SignalingClient(() => new FakeWebSocket('wss://test') as unknown as WebSocket);
+      const config1 = await client.fetchIceConfig();
+      const config2 = await client.fetchIceConfig();
+
+      // Second call returns cached, no second fetch
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(config1).toBe(config2); // same object reference
+      expect(config1.iceServers).toBeDefined();
+    });
+
+    it('refreshIfNeeded does not refetch when TTL is far away', async () => {
+      const fetchSpy = vi.fn();
+      globalThis.fetch = fetchSpy;
+      fetchSpy.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ iceServers: [{ urls: 'stun:stun.example.com:3478' }], ttl: 86400 }),
+      });
+
+      const client = new SignalingClient(() => new FakeWebSocket('wss://test') as unknown as WebSocket);
+      await client.fetchIceConfig();
+      await client.refreshIfNeeded();
+
+      // TTL is 86400s away, so no refetch
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -9,7 +9,7 @@
 export const BASE_URL = process.env.BASE_URL || 'http://localhost:8082';
 
 /** Relay WebSocket URL (matches playwright.config.ts webServer port 8083). */
-export const RELAY_URL = process.env.RELAY_URL || 'ws://localhost:8083';
+export const RELAY_URL = process.env.RELAY_URL || 'ws://localhost:8083/ws';
 
 /** TURN server credentials for E2E tests that use coturn. */
 export const TURN_CONFIG = {

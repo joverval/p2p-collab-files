@@ -9,6 +9,7 @@ import { PanelController } from './shell/panels/panel-controller';
 import { SessionController } from './shell/session-controller';
 import { MarkdownFeature } from './features/markdown/markdown-feature';
 import { exposeTestAPI } from './test-api';
+import * as Y from 'yjs';
 
 declare const __BUILD_TIME__: string;
 console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
@@ -253,5 +254,16 @@ export function createApplication() {
   }
 
   // ── Expose E2E test API (gated by VITE_P2P_TEST_API) ──
-  exposeTestAPI({ feature, session, isHost: () => isHost });
+  exposeTestAPI({
+    feature,
+    session,
+    isHost: () => isHost,
+    chatMessages: () => chat.messages.map(m => ({ sender: m.senderEmail, text: m.text, senderRole: m.senderRole })),
+    signalingListenerCount: () => session.signalingListenerCount,
+    getStateVector: () => {
+      const doc = feature.doc;
+      if (!doc) return [];
+      return Array.from(Y.encodeStateVector(doc));
+    },
+  });
 }

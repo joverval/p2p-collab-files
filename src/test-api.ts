@@ -14,12 +14,21 @@ export interface P2PTestAPI {
   getConnectionRoute(): Promise<{ kind: string; local?: string; remote?: string } | null>;
   getRoomId(): string;
   getShareUrl(): string;
+  /** Yjs state vector for the local document (serialized as number array). */
+  getStateVector(): number[];
+  /** Recent chat messages (last 20). */
+  getChatMessages(): { sender: string; text: string; senderRole: string }[];
+  /** Count of active signaling event listeners. */
+  getSignalingListenerCount(): number;
 }
 
 export function exposeTestAPI(deps: {
   feature: MarkdownFeature;
   session: SessionController;
   isHost: () => boolean;
+  chatMessages?: () => Array<{ sender: string; text: string; senderRole: string }>;
+  signalingListenerCount?: () => number;
+  getStateVector?: () => number[];
 }): void {
   // Gate: expose only when explicitly enabled
   if (import.meta.env.VITE_P2P_TEST_API !== 'true') return;
@@ -63,6 +72,18 @@ export function exposeTestAPI(deps: {
 
     getShareUrl(): string {
       return deps.session.shareUrl;
+    },
+
+    getStateVector(): number[] {
+      return deps.getStateVector?.() ?? [];
+    },
+
+    getChatMessages(): { sender: string; text: string; senderRole: string }[] {
+      return deps.chatMessages?.() ?? [];
+    },
+
+    getSignalingListenerCount(): number {
+      return deps.signalingListenerCount?.() ?? 0;
     },
   };
 

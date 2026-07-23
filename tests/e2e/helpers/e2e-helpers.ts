@@ -41,6 +41,10 @@ export interface E2EHelpers {
   /** Get the CURRENT invite URL from the host page (not a stale snapshot). */
   getShareUrl(page: Page): Promise<string>;
 
+  /** Wait for the host's share URL to change from a previously seen value.
+   *  Ensures the store-offer-next relay call completed before reading. */
+  waitForShareUrlChange(page: Page, previousUrl: string, timeout?: number): Promise<string>;
+
   approvePeer(hostPage: Page, email: string): Promise<void>;
 
   waitForEditor(page: Page): Promise<void>;
@@ -62,6 +66,33 @@ export interface E2EHelpers {
   closeAbruptly(context: BrowserContext): Promise<void>;
 
   cleanup(): Promise<void>;
+
+  // ── Chat helpers ──
+
+  /** Open the chat panel. */
+  openChatPanel(page: Page): Promise<void>;
+
+  /** Send a chat message via the panel input. */
+  sendChatMessage(page: Page, text: string): Promise<void>;
+
+  /** Get all chat message text contents as an array of strings. */
+  getChatMessages(page: Page): Promise<string[]>;
+
+  /** Close the right panel. */
+  closeChatPanel(page: Page): Promise<void>;
+
+  // ── Participant helpers ──
+
+  /** Get the participant email list from the UI. */
+  getParticipantEmails(page: Page): Promise<string[]>;
+
+  /** Get the participant count from the UI. */
+  getParticipantCount(page: Page): Promise<number>;
+
+  // ── Connection state helper ──
+
+  /** Wait for connection state to reach a specific value. */
+  waitForConnectionState(page: Page, state: string, timeout?: number): Promise<void>;
 }
 
 /**
@@ -149,6 +180,20 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
     },
 
     async getShareUrl(page) {
+      return page.evaluate(
+        () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
+      );
+    },
+
+    async waitForShareUrlChange(page, previousUrl, timeout = 10000) {
+      await page.waitForFunction(
+        (oldUrl) => {
+          const current = (window as any).__P2P_TEST__?.getShareUrl?.() ?? '';
+          return current && current !== oldUrl;
+        },
+        previousUrl,
+        { timeout },
+      );
       return page.evaluate(
         () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
       );
@@ -248,6 +293,81 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
           // already closed
         }
       }
+    },
+
+    // ── Chat helpers ──
+
+    async openChatPanel(page) {
+      // Click the chat tab button (data-panel="chat")
+      await page.click('[data-panel="chat"]');
+      // Wait for chat log to appear
+      await page.waitForSelector('#chat-log', { timeout: SELECTOR_TIMEOUT });
+    },
+
+    async sendChatMessage(page, text) {
+      await page.fill('#chat-input', text);
+      await page.click('#chat-send-btn');
+      // Wait for the message to appear in the log
+      await page.waitForFunction(
+        (txt) => {
+          const entries = document.querySelectorAll('#chat-log .log-entry');
+          return Array.from(entries).some(e => e.textContent?.includes(txt as string));
+        },
+        text,
+        { timeout: SELECTOR_TIMEOUT },
+      );
+    },
+
+    async getChatMessages(page) {
+      return page.evaluate(() => {
+        const entries = document.querySelectorAll('#chat-log .log-entry');
+        return Array.from(entries).map(e => e.textContent || '').filter(Boolean);
+      });
+    },
+
+    async closeChatPanel(page) {
+      // If panel is open, clicking the same tab closes it
+      const isVisible = await page.isVisible('#right-panel:not(.panel-hidden)');
+      if (isVisible) {
+        await page.click('[data-panel="chat"]');
+        await page.waitForSelector('#right-panel.panel-hidden', { timeout: SELECTOR_TIMEOUT });
+      }
+    },
+
+    // ── Participant helpers ──
+
+    async getParticipantEmails(page) {
+      // Open users panel
+      await page.click('[data-panel="users"]');
+      await page.waitForSelector('[data-testid="participant-row"]', { timeout: SELECTOR_TIMEOUT });
+      return page.evaluate(() => {
+        const rows = document.querySelectorAll('[data-testid="participant-row"]');
+        return Array.from(rows).map(r => {
+          // First span contains email, second span contains role
+          const spans = r.querySelectorAll('span');
+          return spans[0]?.textContent?.trim() || '';
+        }).filter(Boolean);
+      });
+    },
+
+    async getParticipantCount(page) {
+      await page.click('[data-panel="users"]');
+      await page.waitForSelector('[data-testid="participant-row"]', { timeout: SELECTOR_TIMEOUT });
+      return page.evaluate(() => {
+        return document.querySelectorAll('[data-testid="participant-row"]').length;
+      });
+    },
+
+    // ── Connection state helper ──
+
+    async waitForConnectionState(page, state, timeout = CONNECTION_TIMEOUT) {
+      await page.waitForFunction(
+        (expected) => {
+          return (window as any).__P2P_TEST__?.getConnectionState() === expected;
+        },
+        state,
+        { timeout },
+      );
     },
   };
 }

@@ -1,9 +1,12 @@
 #!/bin/bash
-export TURN_ENABLED=1
-export TURN_PORT=3478
-export TURN_USER="${TURN_USER:-turnuser}"
-export TURN_PASS="${TURN_PASS:-}"
-# TURN_HOST is auto-detected by relay every 5min
+export TURN_ENABLED="${TURN_ENABLED:-0}"
+export TURN_PORT="${TURN_PORT:-3478}"
+export TURN_SECRET="${TURN_SECRET:-}"
+# TURN_HOST is auto-detected via public IP
 cd /home/joverval/Projects/p2p-collab-files
-echo "Relay starting — TURN enabled (auto-detect IP)"
+if [ "$TURN_ENABLED" = "1" ]; then
+  echo "Relay starting — TURN enabled"
+else
+  echo "Relay starting — TURN disabled"
+fi
 exec node server/ws-relay.js

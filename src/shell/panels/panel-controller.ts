@@ -3,6 +3,12 @@
 import { $ } from '../../shared/dom';
 import type { ChatController } from '../chat/chat-controller';
 import type { ParticipantsController } from '../participants/participants-controller';
+import { CHAT_MAX_LENGTH } from '../chat/chat-controller';
+
+/** Strip ASCII control characters except tab, newline, and carriage return. */
+function stripControlChars(text: string): string {
+  return text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, '');
+}
 
 export class PanelController {
   private _currentPanel = '';
@@ -65,8 +71,12 @@ export class PanelController {
 
     // Single safe send path: calls _sendChatFn which was set by app.ts via setSendChat
     const doSend = () => {
-      const text = input.value.trim();
+      let text = input.value.trim();
       if (!text || !this._sendChatFn) return;
+      // Early sanitization: strip control chars and truncate
+      text = stripControlChars(text);
+      if (text.length > CHAT_MAX_LENGTH) text = text.slice(0, CHAT_MAX_LENGTH);
+      if (!text) return;
       this._sendChatFn(text);
       input.value = '';
     };

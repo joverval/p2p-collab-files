@@ -7,6 +7,9 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
+import { validateIncoming, MAX_WS_PAYLOAD, MAX_OFFERS_PER_ROOM, MAX_PROMOTIONS_PER_ROOM } from './relay-schemas.js';
+import { RateLimiter, IPTracker } from './rate-limiter.js';
+import { generateTurnCredentials } from './auth.js';
 
 const DEFAULT_PORT = Number(process.env.PORT || 8083);
 const DEFAULT_TOKEN_TTL = 5 * 60 * 1000;           // 5 min for individual tokens
@@ -18,6 +21,13 @@ const DEFAULT_ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl
 const DEFAULT_GRACE_PERIOD = 10_000;       // 10s for host reconnect
 const DEFAULT_CANDIDATE_TIMEOUT = 30_000;  // 30s for candidate to respond
 const DEFAULT_HEARTBEAT_INTERVAL = 30_000;
+
+// Rate limit defaults (from ADR-S6)
+const DEFAULT_MAX_ROOMS_PER_IP = 10;
+const DEFAULT_MAX_SOCKETS_PER_IP = 20;
+const DEFAULT_MAX_OFFERS_PER_MIN = 30;
+const DEFAULT_MAX_TURN_PER_MIN = 60;
+const DEFAULT_MAX_PEERS_PER_ROOM = 50;
 
 /**
  * Creates a relay server instance. Does NOT auto-start.
@@ -35,9 +45,14 @@ const DEFAULT_HEARTBEAT_INTERVAL = 30_000;
  * @param {number} [options.gracePeriod]    Grace period for host reconnect in ms. Default: 10s.
  * @param {number} [options.candidateTimeout]  Candidate response timeout in ms. Default: 30s.
  * @param {number} [options.heartbeatInterval]  Heartbeat interval in ms. Default: 30s.
+ * @param {number} [options.heartbeatInterval]  Heartbeat interval in ms. Default: 30s.
  * @param {object} [options.turnConfig]     TURN server config.
- * @returns {{ server: http.Server, wss: WebSocketServer, start(port?: number): Promise<number>, stop(): Promise<void>, getState(): object }}
- */
+ * @param {number} [options.maxRoomsPerIP]  Max rooms per IP. Default: 10.
+ * @param {number} [options.maxSocketsPerIP] Max WS connections per IP. Default: 20.
+ * @param {number} [options.maxOffersPerMin] Max offers per IP per minute. Default: 30.
+ * @param {number} [options.maxTurnPerMin]  Max /turn-credentials per IP per minute. Default: 60.
+ * @param {number} [options.maxPeersPerRoom] Max peers per room. Default: 50.
+ * @returns {{ server: http.Server, wss: WebSocketServer, start(port?: number): Promise<number>, stop(): Promise<void>, getState(): object }} */
 export function createRelayServer(options = {}) {
   const {
     port = DEFAULT_PORT,
@@ -52,6 +67,11 @@ export function createRelayServer(options = {}) {
     gracePeriod = DEFAULT_GRACE_PERIOD,
     candidateTimeout = DEFAULT_CANDIDATE_TIMEOUT,
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
+    maxRoomsPerIP = DEFAULT_MAX_ROOMS_PER_IP,
+    maxSocketsPerIP = DEFAULT_MAX_SOCKETS_PER_IP,
+    maxOffersPerMin = DEFAULT_MAX_OFFERS_PER_MIN,
+    maxTurnPerMin = DEFAULT_MAX_TURN_PER_MIN,
+    maxPeersPerRoom = DEFAULT_MAX_PEERS_PER_ROOM,
     turnConfig: tc = null,
   } = options;
 
@@ -59,26 +79,32 @@ export function createRelayServer(options = {}) {
   let TURN_ENABLED = false;
   let TURN_HOST = '';
   let TURN_PORT = 3478;
-  let TURN_USER = '';
-  let TURN_PASS = '';
+  let TURN_SECRET = '';
+  let TURN_TTL = 3600;  // 60 min credential lifetime
 
   if (tc) {
     TURN_ENABLED = tc.enabled === true;
     TURN_HOST = tc.host || '';
     TURN_PORT = tc.port || 3478;
-    TURN_USER = tc.user || '';
-    TURN_PASS = tc.pass || '';
+    TURN_SECRET = tc.secret || '';
+    TURN_TTL = tc.ttl || 3600;
   } else {
     TURN_ENABLED = process.env.TURN_ENABLED === '1' || process.env.TURN_ENABLED === 'true';
     TURN_HOST = process.env.TURN_HOST || '';
     TURN_PORT = Number(process.env.TURN_PORT || 3478);
-    TURN_USER = process.env.TURN_USER || '';
-    TURN_PASS = process.env.TURN_PASS || '';
+    TURN_SECRET = process.env.TURN_SECRET || '';
+    TURN_TTL = Number(process.env.TURN_TTL || 3600);
   }
 
-  if (TURN_ENABLED && (!TURN_USER || !TURN_PASS)) {
-    console.error('TURN_ENABLED=1 but TURN_USER/TURN_PASS not set. TURN disabled.');
+  if (TURN_ENABLED && !TURN_SECRET) {
+    console.error('TURN_ENABLED=1 but TURN_SECRET not set. TURN disabled.');
     TURN_ENABLED = false;
+  }
+
+  if (TURN_ENABLED) {
+    console.log(`TURN enabled: ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1, ${TURN_TTL}s TTL, credentials rotate on relay restart)`);
+  } else {
+    console.log('TURN disabled — set TURN_ENABLED=1 and TURN_SECRET to enable');
   }
 
   // ── ID generation ──
@@ -93,80 +119,60 @@ export function createRelayServer(options = {}) {
   /** @type {Map<string, object>} */
   const rooms = new Map();
 
-  /** @type {Map<string, {roomId: string, role: string, createdAt: number}>} */
+  /** @type {Map<string, {roomId: string, role: string, createdAt: number, participantId?: string}>} */
   const tokenRoom = new Map();
 
-  function createRoom(hostWs, hostEmail) {
+  // ── Rate limiter instances ──
+  const rateLimiter = new RateLimiter(60_000);
+  const ipTracker = new IPTracker();
+
+  function getRemoteIP(ws) {
+    return ws._socket?.remoteAddress || 'unknown';
+  }
+  function getRemoteIPFromReq(req) {
+    return req.socket?.remoteAddress || 'unknown';
+  }
+
+  // ── Privacy-safe logging ──
+  // Never log SDP bodies, TURN creds, file content, chat content,
+  // full invite URLs, raw tokens, or email addresses. Use opaque IDs
+  // (roomId, participantId) where possible. Hash IPs and origins so
+  // operators can still correlate without storing raw PII.
+  function logSafe(value) {
+    return crypto.createHash('sha256').update(value).digest('hex').slice(0, 8);
+  }
+
+  function createRoom(hostWs, hostEmail, creatorIP) {
     const roomId = genRoomId();
-    const normalizedEmail = hostEmail ? hostEmail.trim().toLowerCase() : 'host';
+    const hostPid = genToken();
+    const normalizedEmail = normalizeEmail(hostEmail) || 'host';
     const room = {
       roomId,
       hostWs,
+      hostParticipantId: hostPid,
       participants: new Map(),
       offers: new Map(),
+      promotionOffers: new Set(),
       created: clock(),
       members: new Map(),
       lastActivityAt: clock(),
+      _creatorIP: creatorIP,
     };
-    room.members.set(normalizedEmail, { email: normalizedEmail, ws: hostWs, joinOrder: 1 });
+    room.members.set(normalizedEmail, { participantId: hostPid, email: normalizedEmail, ws: hostWs, joinOrder: 1 });
     rooms.set(roomId, room);
     return room;
   }
 
   function normalizeEmail(email) {
-    return (email || '').trim().toLowerCase();
+    const trimmed = (email || '').trim();
+    if (trimmed.length === 0) return null;
+    if (trimmed.length > 254) return null;
+    // Reject control characters (ASCII 0-31 and DEL)
+    if (/[\x00-\x1f\x7f]/.test(trimmed)) return null;
+    return trimmed.toLowerCase();
   }
 
-  // ── Message validation ──
-  function validateMessage(msg) {
-    if (!msg || typeof msg.type !== 'string') return 'Missing or invalid type';
-
-    switch (msg.type) {
-      case 'store-offer':
-        if (!msg.sdp) return 'store-offer: missing sdp';
-        if (!msg.offerId) return 'store-offer: missing offerId';
-        break;
-      case 'fetch-offer':
-        if (!msg.token) return 'fetch-offer: missing token';
-        break;
-      case 'submit-answer':
-        if (!msg.token) return 'submit-answer: missing token';
-        if (!msg.email) return 'submit-answer: missing email';
-        if (!msg.answerB64) return 'submit-answer: missing answerB64';
-        break;
-      case 'host-approve':
-      case 'host-reject':
-        if (!msg.token) return `${msg.type}: missing token`;
-        break;
-      case 'become-host':
-        if (!msg.oldToken) return 'become-host: missing oldToken';
-        break;
-      case 'store-offer-next':
-        if (!msg.roomId) return 'store-offer-next: missing roomId';
-        if (!msg.sdp) return 'store-offer-next: missing sdp';
-        if (!msg.offerId) return 'store-offer-next: missing offerId';
-        break;
-      case 'promote-peer':
-        if (!msg.roomId) return 'promote-peer: missing roomId';
-        if (!msg.targetEmail) return 'promote-peer: missing targetEmail';
-        break;
-      case 'store-promotion-offer':
-        if (!msg.roomId) return 'store-promotion-offer: missing roomId';
-        if (!msg.sdp) return 'store-promotion-offer: missing sdp';
-        if (!msg.offerId) return 'store-promotion-offer: missing offerId';
-        break;
-      case 'commit-promotion':
-        if (!msg.roomId) return 'commit-promotion: missing roomId';
-        if (!msg.promotionId) return 'commit-promotion: missing promotionId';
-        break;
-      case 'ping':
-        break;
-      default:
-        return `Unknown message type: ${msg.type}`;
-    }
-    return null;
-  }
-
+  // ── Helpers ──
   function sendJson(ws, msg) {
     if (ws.readyState === 1) ws.send(JSON.stringify(msg));
   }
@@ -174,6 +180,53 @@ export function createRelayServer(options = {}) {
   function respond(ws, base, requestId) {
     if (requestId) base.requestId = requestId;
     sendJson(ws, base);
+  }
+
+  // ── Identity helpers ──
+  function getSenderInfo(ws) {
+    for (const [roomId, room] of rooms) {
+      for (const [pid, member] of room.members) {
+        if (member.ws === ws) return { room, participantId: member.participantId, email: member.email };
+      }
+    }
+    return null;
+  }
+
+  function getTokenInfo(token) {
+    return tokenRoom.get(token) || null;
+  }
+
+  // ── Authorization guards ──
+  function requireHost(ws, room, requestId) {
+    const sender = getSenderInfo(ws);
+    if (!sender) {
+      respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+      return false;
+    }
+    if (sender.participantId !== room.hostParticipantId) {
+      respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Host only' }, requestId);
+      return false;
+    }
+    return true;
+  }
+
+  function requirePromotionTarget(ws, room, requestId) {
+    const sender = getSenderInfo(ws);
+    if (!sender) {
+      respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+      return false;
+    }
+    const promotion = room._promotion;
+    if (!promotion) {
+      respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'No promotion in progress' }, requestId);
+      return false;
+    }
+    // Authorize by participantId — no email lookup needed
+    if (sender.participantId !== promotion.targetParticipantId) {
+      respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not the promotion target' }, requestId);
+      return false;
+    }
+    return true;
   }
 
   // ── Auto host failover ──
@@ -198,7 +251,7 @@ export function createRelayServer(options = {}) {
     }
 
     const candidate = candidates[0];
-    console.log(`[failover] room ${room.roomId}: initiating auto promotion to ${candidate.email}`);
+    console.log(`[failover] room ${room.roomId}: initiating auto promotion to ${candidate.participantId}`);
 
     const promotionId = genToken();
     const participantList = [];
@@ -219,13 +272,13 @@ export function createRelayServer(options = {}) {
     });
 
     const timer = setTimeout(() => {
-      console.log(`[failover] room ${room.roomId}: candidate ${candidate.email} timed out`);
+      console.log(`[failover] room ${room.roomId}: candidate ${candidate.participantId} timed out`);
       room.pendingPromotion = undefined;
       candidate._failed = true;
       initiateAutoFailover(room, departedHostEmail);
     }, candidateTimeout);
 
-    room._promotion = { promotionId, targetEmail: candidate.email, oldHostEmail, _startedAt: clock() };
+    room._promotion = { promotionId, targetEmail: candidate.email, targetParticipantId: candidate.participantId, oldHostEmail, _startedAt: clock() };
     room.pendingPromotion = { promotionId, targetEmail: candidate.email, candidateWs: candidate.ws, timer };
     room.lastActivityAt = clock();
   }
@@ -251,6 +304,15 @@ export function createRelayServer(options = {}) {
     }
 
     if (req.method === 'GET' && req.url === '/turn-credentials') {
+      // Rate limit per IP
+      const ip = getRemoteIPFromReq(req);
+      const ipKey = `turn:${ip}`;
+      if (!rateLimiter.check(ipKey, maxTurnPerMin)) {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error: 'RATE_LIMITED', message: 'Too many requests' }));
+        return;
+      }
+
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Type', 'application/json');
       res.writeHead(200);
@@ -262,13 +324,15 @@ export function createRelayServer(options = {}) {
       ];
 
       if (TURN_ENABLED) {
+        // Time-limited HMAC-SHA1 credentials (coturn use-auth-secret mode)
+        const creds = generateTurnCredentials(TURN_SECRET, TURN_TTL);
         iceServers.push({
           urls: [
             `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
             `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`,
           ],
-          username: TURN_USER,
-          credential: TURN_PASS,
+          username: creds.username,
+          credential: creds.password,
         });
       }
 
@@ -284,8 +348,49 @@ export function createRelayServer(options = {}) {
     res.end('Not Found');
   });
 
-  // ── WebSocket server ──
-  const wss = new WebSocketServer({ server });
+  // ── WebSocket server (noServer mode for path isolation) ──
+  const wss = new WebSocketServer({ noServer: true });
+
+  // Path-based WS upgrade with Origin validation
+  server.on('upgrade', (request, socket, head) => {
+    // Only serve WS on /ws path
+    const { pathname } = new URL(request.url, `http://${request.headers.host}`);
+    if (pathname !== '/ws') {
+      socket.destroy();
+      return;
+    }
+
+    // Origin validation
+    const origin = request.headers.origin || '';
+    const isProduction = process.env.NODE_ENV === 'production';
+
+    if (isProduction && !origin) {
+      console.warn('[security] WS upgrade rejected — no Origin header in production');
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    if (origin && !allowedOrigins.includes(origin)) {
+      console.warn(`[security] WS upgrade rejected — origin hash:${logSafe(origin)} not in allowlist`);
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // Socket limit per IP
+    const upgradeIP = request.socket?.remoteAddress || 'unknown';
+    if (ipTracker.socketCount(upgradeIP) >= maxSocketsPerIP) {
+      console.warn(`[security] WS upgrade rejected — IP hash:${logSafe(upgradeIP)} exceeded socket limit`);
+      socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  });
 
   // Periodic heartbeat
   const hbInterval = setInterval(() => {
@@ -304,6 +409,11 @@ export function createRelayServer(options = {}) {
   wss.on('connection', (ws) => {
     wsMeta.set(ws, { lastPong: clock() });
     ws.isAlive = true;
+
+    // Track socket per IP
+    const wsIP = getRemoteIP(ws);
+    ipTracker.trackSocket(wsIP, ws);
+
     ws.on('pong', () => {
       const meta = wsMeta.get(ws);
       if (meta) meta.lastPong = clock();
@@ -311,12 +421,21 @@ export function createRelayServer(options = {}) {
     });
 
     ws.on('message', (raw) => {
-      let msg;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      // Payload size check
+      if (raw.byteLength > MAX_WS_PAYLOAD) {
+        respond(ws, { type: 'error', code: 'PAYLOAD_TOO_LARGE', message: `Message exceeds ${MAX_WS_PAYLOAD} byte limit` });
+        return;
+      }
 
-      const validationError = validateMessage(msg);
-      if (validationError) {
-        respond(ws, { type: 'error', message: validationError }, msg.requestId);
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch {
+        respond(ws, { type: 'error', code: 'INVALID_MESSAGE', message: 'Invalid JSON' });
+        return;
+      }
+
+      const validation = validateIncoming(msg);
+      if (!validation.ok) {
+        respond(ws, { type: 'error', code: validation.error.code, message: validation.error.message }, msg.requestId);
         return;
       }
 
@@ -326,12 +445,37 @@ export function createRelayServer(options = {}) {
         // ── store-offer (creates room) ──
         case 'store-offer': {
           const normalizedEmail = normalizeEmail(msg.hostEmail);
-          const room = createRoom(ws, normalizedEmail);
+          if (!normalizedEmail) {
+            respond(ws, { type: 'error', message: 'Invalid email: must be 254 chars max, no control characters' }, requestId);
+            return;
+          }
+
+          // Room limit per IP
+          const offerIP = getRemoteIP(ws);
+          if (ipTracker.roomCount(offerIP) >= maxRoomsPerIP) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many rooms from this IP' }, requestId);
+            return;
+          }
+
+          // Offer rate per IP
+          const offerKey = `offer:${offerIP}`;
+          if (!rateLimiter.check(offerKey, maxOffersPerMin)) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many offers, slow down' }, requestId);
+            return;
+          }
+
+          const room = createRoom(ws, normalizedEmail, offerIP);
+          ipTracker.trackRoom(offerIP, room.roomId);
+          // Offer count per room
+          if (room.offers.size >= MAX_OFFERS_PER_ROOM) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Room has too many outstanding offers' }, requestId);
+            return;
+          }
           const offerToken = genToken();
           room.offers.set(offerToken, { sdp: msg.sdp, offerId: msg.offerId });
-          tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host', createdAt: clock() });
+          tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host', createdAt: clock(), participantId: room.hostParticipantId });
           const hostToken = 'host:' + genToken();
-          room.participants.set(hostToken, { ws, email: normalizedEmail, role: 'host' });
+          room.participants.set(hostToken, { ws, email: normalizedEmail, participantId: room.hostParticipantId, role: 'host' });
           room.lastActivityAt = clock();
           respond(ws, { type: 'token', token: offerToken, roomId: room.roomId, offerId: msg.offerId }, requestId);
           break;
@@ -357,23 +501,38 @@ export function createRelayServer(options = {}) {
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
-          const normalizedEmail = normalizeEmail(msg.email);
+          // Peer limit per room
+          if (ipTracker.peerCount(info.roomId) >= maxPeersPerRoom) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Room is full' }, requestId);
+            return;
+          }
 
+          const normalizedEmail = normalizeEmail(msg.email);
+          if (!normalizedEmail) {
+            respond(ws, { type: 'error', message: 'Invalid email: must be 254 chars max, no control characters' }, requestId);
+            return;
+          }
+
+          // Look up existing member to preserve participantId on reconnect
+          const existingMember = room.members.get(normalizedEmail);
+          const peerPid = existingMember ? existingMember.participantId : genToken();
           const peerToken = genToken();
           room.participants.set(peerToken, {
             ws,
             email: normalizedEmail,
+            participantId: peerPid,
             role: 'peer',
             pendingRequestWs: ws,
             _pendingSince: clock(),
           });
-          tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer', createdAt: clock() });
+          tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer', createdAt: clock(), participantId: peerPid });
 
-          const existingMember = room.members.get(normalizedEmail);
+          ipTracker.trackPeer(info.roomId, peerPid);
+
           if (!existingMember) {
             let maxOrder = 0;
             for (const [, m] of room.members) { if (m.joinOrder > maxOrder) maxOrder = m.joinOrder; }
-            room.members.set(normalizedEmail, { email: normalizedEmail, ws, joinOrder: maxOrder + 1 });
+            room.members.set(normalizedEmail, { participantId: peerPid, email: normalizedEmail, ws, joinOrder: maxOrder + 1 });
           } else {
             existingMember.ws = ws;
           }
@@ -400,6 +559,8 @@ export function createRelayServer(options = {}) {
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+          if (!requireHost(ws, room, requestId)) return;
           const participant = room.participants.get(msg.token);
           if (participant && participant.pendingRequestWs && participant.pendingRequestWs.readyState === 1) {
             respond(participant.pendingRequestWs, { type: 'approved' }, requestId);
@@ -416,6 +577,8 @@ export function createRelayServer(options = {}) {
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+          if (!requireHost(ws, room, requestId)) return;
           const participant = room.participants.get(msg.token);
           if (participant) {
             if (participant.pendingRequestWs?.readyState === 1) {
@@ -435,6 +598,13 @@ export function createRelayServer(options = {}) {
           if (!info) { respond(ws, { type: 'error', message: 'Old token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+          // Authorization: the caller must be a room member
+          const sender = getSenderInfo(ws);
+          if (!sender || sender.room.roomId !== room.roomId) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+            return;
+          }
 
           if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = undefined; }
           if (room.pendingPromotion) {
@@ -463,6 +633,8 @@ export function createRelayServer(options = {}) {
           const room = msg.roomId ? rooms.get(msg.roomId) : null;
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
+          if (!requireHost(ws, room, requestId)) return;
+
           if (room.graceTimer) {
             clearTimeout(room.graceTimer);
             room.graceTimer = undefined;
@@ -473,6 +645,12 @@ export function createRelayServer(options = {}) {
             room.pendingPromotion = undefined;
           }
           room.hostWs = ws;
+
+          // Offer count per room
+          if (room.offers.size >= MAX_OFFERS_PER_ROOM) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Room has too many outstanding offers' }, requestId);
+            return;
+          }
 
           const nextToken = genToken();
           room.offers.set(nextToken, { sdp: msg.sdp, offerId: msg.offerId });
@@ -491,11 +669,23 @@ export function createRelayServer(options = {}) {
           const room = msg.roomId ? rooms.get(msg.roomId) : null;
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
-          const normalizedTarget = normalizeEmail(msg.targetEmail);
+          if (!requireHost(ws, room, requestId)) return;
 
+          const normalizedTarget = normalizeEmail(msg.targetEmail);
+          if (!normalizedTarget) {
+            respond(ws, { type: 'error', message: 'Invalid target email: must be 254 chars max, no control characters' }, requestId);
+            return;
+          }
+
+          // Resolve target by email from participants
           let target = undefined;
+          let targetParticipantId = undefined;
           for (const [, p] of room.participants) {
-            if (p.email === normalizedTarget && p.role === 'peer') { target = p; break; }
+            if (p.email === normalizedTarget && p.role === 'peer') {
+              target = p;
+              targetParticipantId = p.participantId;
+              break;
+            }
           }
           if (!target) { respond(ws, { type: 'error', message: 'Target peer not found' }, requestId); return; }
 
@@ -505,18 +695,22 @@ export function createRelayServer(options = {}) {
             participantList.push({ email: p.email, isHost: p.role === 'host' });
           }
 
-          const oldHostEmail = [...room.participants.values()].find(p => p.role === 'host')?.email || 'unknown';
+          const oldHost = [...room.participants.values()].find(p => p.role === 'host');
+          const oldHostEmail = oldHost?.email || 'unknown';
+          const oldHostParticipantId = oldHost?.participantId;
+
           sendJson(target.ws, {
             type: 'promotion-request',
             roomId: room.roomId,
             promotionId,
             targetEmail: normalizedTarget,
+            targetParticipantId,
             oldHostEmail,
             participants: participantList,
             automatic: msg.automatic || false,
           });
 
-          room._promotion = { promotionId, targetEmail: normalizedTarget, oldHostEmail, _startedAt: clock() };
+          room._promotion = { promotionId, targetEmail: normalizedTarget, targetParticipantId, oldHostEmail, oldHostParticipantId, _startedAt: clock() };
           if (msg.automatic) {
             room.pendingPromotion = { promotionId, targetEmail: normalizedTarget, candidateWs: target.ws, timer: null };
           }
@@ -530,7 +724,22 @@ export function createRelayServer(options = {}) {
           const room = msg.roomId ? rooms.get(msg.roomId) : null;
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
+          if (!requirePromotionTarget(ws, room, requestId)) return;
+
+          // Offer count per room
+          if (room.offers.size >= MAX_OFFERS_PER_ROOM) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Room has too many outstanding offers' }, requestId);
+            return;
+          }
+
+          // Promotion offer count per room
+          if (room.promotionOffers.size >= MAX_PROMOTIONS_PER_ROOM) {
+            respond(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Too many active promotion offers' }, requestId);
+            return;
+          }
+
           const token = genToken();
+          room.promotionOffers.add(token);
           room.offers.set(token, {
             sdp: msg.sdp,
             offerId: msg.offerId,
@@ -547,6 +756,8 @@ export function createRelayServer(options = {}) {
         case 'commit-promotion': {
           const room = msg.roomId ? rooms.get(msg.roomId) : null;
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+          if (!requirePromotionTarget(ws, room, requestId)) return;
 
           const promotion = room._promotion;
           if (!promotion || promotion.promotionId !== msg.promotionId) {
@@ -569,8 +780,8 @@ export function createRelayServer(options = {}) {
           room.hostWs = ws;
 
           for (const [, p] of room.participants) {
-            if (p.email === promotion.targetEmail) p.role = 'host';
-            else if (p.email === promotion.oldHostEmail) p.role = 'peer';
+            if (p.participantId === promotion.targetParticipantId) p.role = 'host';
+            else if (p.participantId === promotion.oldHostParticipantId) p.role = 'peer';
           }
 
           if (room.pendingPromotion &&
@@ -599,11 +810,13 @@ export function createRelayServer(options = {}) {
 
         if (wasHost) {
           room.hostWs = null;
-          const departedHostEmail = [...room.participants.values()]
-            .find(p => p.ws === ws)?.email || null;
+          const departedHost = [...room.participants.values()]
+            .find(p => p.ws === ws);
+          const departedHostEmail = departedHost?.email || null;
+          const departedHostPid = departedHost?.participantId || null;
 
           if (departedHostEmail) {
-            console.log(`[failover] room ${roomId}: host ${departedHostEmail} disconnected, starting ${gracePeriod/1000}s grace period`);
+            console.log(`[failover] room ${roomId}: host ${departedHostPid} disconnected, starting ${gracePeriod/1000}s grace period`);
             room.graceTimer = setTimeout(() => {
               room.graceTimer = undefined;
               console.log(`[failover] room ${roomId}: grace period expired, initiating auto failover`);
@@ -615,11 +828,13 @@ export function createRelayServer(options = {}) {
         for (const [token, p] of room.participants) {
           if (p.ws === ws) {
             room.participants.delete(token);
+            if (p.participantId) ipTracker.untrackPeer(roomId, p.participantId);
             if (tokenRoom.get(token)?.role !== 'host') tokenRoom.delete(token);
           }
         }
       }
       wsMeta.delete(ws);
+      ipTracker.untrackAllForWs(ws);
     });
   });
 
@@ -634,13 +849,14 @@ export function createRelayServer(options = {}) {
   const cleanupInterval = setInterval(() => {
     const now = clock();
 
-    // Expire individual tokens past their TTL
+    // Expire individual tokens past their respective TTLs.
+    // Offer tokens (role === 'host') use offerTTL; all others use tokenTTL.
     for (const [tk, info] of tokenRoom) {
-      if (now - info.createdAt > tokenTTL) {
-        tokenRoom.delete(tk);
-        // Also clean up the corresponding participant if no other tokens reference it
+      const ttl = info.role === 'host' ? offerTTL : tokenTTL;
+      if (now - info.createdAt > ttl) {
         const room = rooms.get(info.roomId);
         if (room) {
+          // Clean stale offer without deleting room
           room.offers.delete(tk);
           const participant = room.participants.get(tk);
           if (participant && ![...tokenRoom.values()].some(v => {
@@ -652,6 +868,7 @@ export function createRelayServer(options = {}) {
             room.participants.delete(tk);
           }
         }
+        tokenRoom.delete(tk);
       }
     }
 
@@ -683,6 +900,16 @@ export function createRelayServer(options = {}) {
         }
       }
 
+      // Sweep orphaned offers: offers whose token no longer exists.
+      // This covers tokens that were consumed (e.g. fetch-offer) but
+      // not explicitly deleted from room.offers.
+      for (const [offerKey] of room.offers) {
+        if (!tokenRoom.has(offerKey)) {
+          room.offers.delete(offerKey);
+          room.promotionOffers.delete(offerKey);
+        }
+      }
+
       // Skip active rooms (have connected sockets)
       if (hasActiveSocket(room)) {
         room.lastActivityAt = now; // bump activity to prevent premature expiry
@@ -703,9 +930,15 @@ export function createRelayServer(options = {}) {
         for (const [tk, info] of tokenRoom) {
           if (info.roomId === roomId) tokenRoom.delete(tk);
         }
+        // Untrack from IP tracker
+        ipTracker.roomPeers.delete(roomId);
+        if (room._creatorIP) ipTracker.untrackRoom(room._creatorIP, roomId);
         rooms.delete(roomId);
       }
     }
+
+    // Cleanup stale rate-limiter entries
+    rateLimiter.cleanup();
   }, 60_000);
 
   return {

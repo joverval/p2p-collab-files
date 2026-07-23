@@ -2,7 +2,7 @@
 
 import type { IceConfigProvider, OutgoingSignalMessage, IncomingSignalMessage, ErrorMessage, SignalingResponse } from '../shared/types';
 
-const WS_URL = import.meta.env.VITE_SIGNAL_WS_URL || 'wss://relay.joverval.cl';
+const WS_URL = import.meta.env.VITE_SIGNAL_WS_URL || 'wss://relay.joverval.cl/ws';
 const HTTP_URL = import.meta.env.VITE_SIGNAL_HTTP_URL || 'https://relay.joverval.cl';
 
 export type WsFactory = (url: string) => WebSocket;
@@ -140,6 +140,13 @@ export class SignalingClient implements IceConfigProvider {
   }
 
   get iceConfig(): RTCConfiguration | null { return this._iceConfig; }
+
+  /** Count of active event subscribers (for test diagnostics). */
+  get listenerCount(): number {
+    let count = 0;
+    for (const set of this.handlers.values()) count += set.size;
+    return count;
+  }
 
   private dispatch(m: IncomingSignalMessage) {
     const reqId = m.requestId;

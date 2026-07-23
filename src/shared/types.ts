@@ -71,6 +71,8 @@ export interface PromotionRequestMessage extends SignalingMessage {
   oldHostEmail: string;
   roomId: string;
   promotionId: string;
+  targetEmail: string;
+  targetParticipantId?: string;
   participants?: Array<{ email: string }>;
 }
 
@@ -146,6 +148,7 @@ export interface PromotePeerMessage {
   type: 'promote-peer';
   roomId: string;
   targetEmail: string;
+  targetParticipantId?: string;
 }
 
 export interface StorePromotionOfferMessage {
