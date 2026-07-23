@@ -670,3 +670,9 @@ export function createRelayServer(options = {}) {
     },
   };
 }
+
+// Auto-start when run directly (not when imported by tests)
+if (!process.env.VITEST && !process.env.VITEST_WORKER_ID) {
+  const relay = createRelayServer();
+  relay.start().then(port => console.log(`Relay listening on port ${port}`));
+}
