@@ -185,7 +185,7 @@ export class SessionController {
           r.broadcastExcept(data);
         }
       }
-    }
+    });
 
     r.onPeerJoin(async (peerId) => {
       const pe = peerId;
