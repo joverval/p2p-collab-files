@@ -8,7 +8,6 @@ import { ParticipantsController } from './shell/participants/participants-contro
 import { PanelController } from './shell/panels/panel-controller';
 import { SessionController } from './shell/session-controller';
 import { MarkdownFeature } from './features/markdown/markdown-feature';
-import { encodeChat } from './shell/protocol/message-envelope';
 
 declare const __BUILD_TIME__: string;
 console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
@@ -49,6 +48,7 @@ export function createApplication() {
       isHost: () => isHost,
       isConnected: () => session.isConnected,
       sendFeatureData: (data) => session.sendFeature(data),
+      sendFeatureDataToPeer: (peerId, data) => session.sendFeatureDataToPeer(peerId, data),
       sendControlMessage: (msg) => session.sendControl(msg),
       reportStatus: (msg) => chat.addLog('system', msg),
     });
@@ -62,11 +62,7 @@ export function createApplication() {
     ($('toast-msg') as HTMLElement).textContent = `🔔 ${pEmail}`;
     $('toast').style.display = 'flex';
     ($('toast-approve') as HTMLButtonElement).onclick = () => {
-      if (offerId && answerB64) {
-        session.pendingPeerEmail = pEmail;
-        session.acceptAnswer(`#sdp=${answerB64}`, offerId);
-      }
-      session.approvePeer(token);
+      session.approvePeer({ email: pEmail, token, offerId: offerId!, answerB64: answerB64! });
       $('toast').style.display = 'none';
       chat.addLog('system', `✅ Approved ${pEmail}`);
     };
@@ -76,8 +72,9 @@ export function createApplication() {
     };
   };
 
-  session.onPeerJoin = (peerEmail) => {
+  session.onPeerJoin = (peerId, peerEmail) => {
     participants.allUsers = [...participants.allUsers, { email: peerEmail, isHost: false }];
+    feature.onPeerJoined?.(peerId);
     updateTopBar();
   };
   session.onPeerLeave = (peerEmail) => {
@@ -97,13 +94,12 @@ export function createApplication() {
   session.onControlMessage = (text) => feature.handleControlMessage(text);
   session.onChatMessage = (sender, text) => chat.addLog('received', `${sender}: ${text}`);
   session.onRoomState = (peers) => { participants.allUsers = peers; updateTopBar(); };
-  session.setConnected = (v) => { /* data channel state tracked internally */ };
+  
   session.getEmail = () => email;
 
   // ── Promote button ──
   participants.onPromote = async (targetEmail) => {
-    const rtcConfig = (window as any).__rtcConfig;
-    await session.promotePeer(targetEmail, participants.allUsers, rtcConfig, () => feature.doc, () => feature.text);
+    await session.promotePeer(targetEmail);
   };
 
   // ── UI bindings ──
@@ -175,7 +171,7 @@ export function createApplication() {
       ($('manual-answer-input') as HTMLInputElement).style.display = '';
       ($('manual-answer-btn') as HTMLButtonElement).style.display = '';
       ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
-        session.acceptAnswer(($('manual-answer-input') as HTMLInputElement).value.trim());
+        session.manualAcceptAnswer(($('manual-answer-input') as HTMLInputElement).value.trim());
       };
     }
   });

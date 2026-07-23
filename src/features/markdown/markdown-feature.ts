@@ -7,7 +7,22 @@ import { createDoc, NETWORK_ORIGIN, enqueueLocalUpdate, FILE_OPEN_ORIGIN } from 
 import { createEditor } from './editor-controller';
 import { FileController } from './file-controller';
 import { PreviewController } from './preview-controller';
-import { encodeChat } from '../../shell/protocol/message-envelope';
+
+// Sync subprotocol message kinds (2-byte prefix)
+// 0x02 0x00 = SYNC_STEP_1 (state vector)
+// 0x03 0x00 = SYNC_STEP_2 (missing update)
+function encodeSyncStep1(sv: Uint8Array): Uint8Array {
+  const m = new Uint8Array(2 + sv.length);
+  m[0] = 0x02; m[1] = 0x00;
+  m.set(sv, 2);
+  return m;
+}
+function encodeSyncStep2(update: Uint8Array): Uint8Array {
+  const m = new Uint8Array(2 + update.length);
+  m[0] = 0x03; m[1] = 0x00;
+  m.set(update, 2);
+  return m;
+}
 
 export class MarkdownFeature implements CollaborationFeature {
   private ydoc: Y.Doc | null = null;
@@ -56,19 +71,29 @@ export class MarkdownFeature implements CollaborationFeature {
 
   onDisconnected(): void {}
 
+  onPeerJoined(peerId: string): void {
+    if (!this.ctx?.isHost() || !this.ydoc) return;
+    // Minimum fix: send complete document state as update to the new peer
+    const fullState = Y.encodeStateAsUpdate(this.ydoc);
+    this.ctx!.sendFeatureDataToPeer(peerId, fullState);
+  }
+
   handleFeatureData(data: Uint8Array, _peerId?: string): void {
-    if (!this.ydoc || !this.ytext) return;
-    // Decode outer envelope: data = [0x01, seqHi, seqLo, ...update]
-    const update = data.slice(3);
-    const savedCursor = this.editorView ? this.editorView.state.selection.main.head : 0;
-    Y.applyUpdate(this.ydoc, update, NETWORK_ORIGIN);
-    // Sync CodeMirror with Yjs text (belt-and-suspenders with yCollab)
-    const newText = this.ytext.toString();
-    if (this.editorView && this.editorView.state.doc.toString() !== newText) {
-      this.editorView.dispatch({ changes: { from: 0, to: this.editorView.state.doc.length, insert: newText } });
-    }
-    if (this.editorView && savedCursor <= this.editorView.state.doc.length) {
-      this.editorView.dispatch({ selection: { anchor: savedCursor } });
+    if (!this.ydoc) return;
+    const update = data.slice(3); // strip 0x01 + seq envelope
+
+    // Check sync subprotocol prefix
+    if (update.length >= 2 && update[0] === 0x02 && update[1] === 0x00) {
+      // SYNC_STEP_1: received state vector — compute missing update and reply
+      const stateVector = update.slice(2);
+      const missing = Y.encodeStateAsUpdate(this.ydoc, stateVector);
+      this.ctx!.sendFeatureData(encodeSyncStep2(missing));
+    } else if (update.length >= 2 && update[0] === 0x03 && update[1] === 0x00) {
+      // SYNC_STEP_2: received missing update — apply it
+      Y.applyUpdate(this.ydoc, update.slice(2), NETWORK_ORIGIN);
+    } else {
+      // Regular update
+      Y.applyUpdate(this.ydoc, update, NETWORK_ORIGIN);
     }
     this.preview?.schedule();
   }
@@ -77,8 +102,10 @@ export class MarkdownFeature implements CollaborationFeature {
     if (text.startsWith('[FILENAME]')) {
       this.fileController!.filename = text.slice(10);
     } else if (text.startsWith('[SYNC]')) {
-      if (this.ydoc && this.ctx) {
-        this.ctx.sendFeatureData(Y.encodeStateAsUpdate(this.ydoc));
+      // Manual sync: host sends full state
+      if (this.ydoc && this.ctx?.isHost()) {
+        const fullState = Y.encodeStateAsUpdate(this.ydoc);
+        this.ctx.sendFeatureData(fullState);
       }
     }
   }

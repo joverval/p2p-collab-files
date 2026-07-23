@@ -26,14 +26,14 @@ export class FileController {
     try {
       let name: string, c: string;
       if (this.hasFileSystemAPI()) {
-        const [h] = await window.showOpenFilePicker({ types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }] });
+        const [h] = await (window as any).showOpenFilePicker({ types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }] });
         this.fileHandle = h; name = h.name; c = await (await h.getFile()).text();
       } else {
         const r = await this.fallbackOpenFile();
         name = r.name; c = r.content;
       }
       ydoc.transact(() => { ytext.delete(0, ytext.length); ytext.insert(0, c); }, FILE_OPEN_ORIGIN);
-      if (editorView) editorView.dispatch({ changes: { from: 0, to: editorView.state.doc.length, insert: c } });
+      // yCollab handles CodeMirror sync automatically
       this.filename = name;
       this.onFilenameBroadcast(name);
     } catch (err: any) { if (err.name !== 'AbortError') console.error(err); }
@@ -46,7 +46,7 @@ export class FileController {
         try { const w = await this.fileHandle.createWritable(); await w.write(content); await w.close(); return; } catch {}
       }
       try {
-        const h = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }] });
+        const h = await (window as any).showSaveFilePicker({ suggestedName: name, types: [{ description: 'Markdown', accept: { 'text/markdown': ['.md'] } }] });
         const w = await h.createWritable(); await w.write(content); await w.close();
         if (this.isHost()) { this.fileHandle = h; this.filename = h.name; this.onFilenameBroadcast(h.name); }
       } catch {}
@@ -75,7 +75,8 @@ export class FileController {
   }
 
   private fallbackSaveFile(content: string, name: string) {
-    const b = new Blob([content], { type: 'text/markdown' });
-    const a = el('a', { href: URL.createObjectURL(b), download: name }); a.click();
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown' }));
+    const a = el('a', { href: url, download: name }); a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 100);
   }
 }

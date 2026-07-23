@@ -7,6 +7,8 @@ import { encodeChat, encodeYjs, decodeMessage } from './protocol/message-envelop
 import type { Participant } from './participants/participants-controller';
 import { SignalingClient } from './signaling-client';
 
+export type ConnectionState = 'idle' | 'signaling' | 'negotiating' | 'connected' | 'reconnecting' | 'failed' | 'closed';
+
 export class SessionController {
   private signaling = new SignalingClient();
   private room: Room | null = null;
@@ -17,14 +19,15 @@ export class SessionController {
   private _shareUrl = '';
   private _baseUrl: string;
   private _peerEmails = new Map<string, string>();
-  private _pendingPeerEmail = '';
   private promotionInProgress = false;
+  private _connectionState: ConnectionState = 'idle';
+  private _permanentHandlersRegistered = false;
 
   // Callbacks
   onLog?: (type: string, text: string) => void;
   onPendingRequest?: (email: string, token: string, offerId?: string, answerB64?: string) => void;
   onConnected?: (route: string) => void;
-  onPeerJoin?: (peerEmail: string) => void;
+  onPeerJoin?: (peerId: string, peerEmail: string) => void;
   onPeerLeave?: (email: string) => void;
   onFeatureData?: (data: Uint8Array, peerId: string) => void;
   onControlMessage?: (text: string) => void;
@@ -36,6 +39,56 @@ export class SessionController {
 
   constructor() {
     this._baseUrl = window.location.href.split('#')[0];
+    this.registerPermanentHandlers();
+  }
+
+  /** Register signaling event handlers that live for the entire session (called once in constructor). */
+  private registerPermanentHandlers(): void {
+    if (this._permanentHandlersRegistered) return;
+    this._permanentHandlersRegistered = true;
+
+    // Host side: peer join request
+    this.signaling.on('peer-request', (m: any) => {
+      this.onLog?.('system', `📩 ${m.email} wants to join`);
+      this.onPendingRequest?.(m.email, m.token, m.offerId, m.answerB64);
+    });
+
+    // Peer side: host approval
+    this.signaling.on('approved', () => {
+      this._connectionState = 'connected';
+      this.setConnected?.(true);
+    });
+
+    // Peer side: promotion request from old host
+    this.signaling.on('promotion-request', (m: any) => this.handlePromotionRequest(m));
+
+    // Peer side: new host after promotion failover
+    this.signaling.on('new-host', async (m: any) => {
+      this.onLog?.('system', `🔄 New host: ${m.hostEmail} — reconnecting...`);
+      this._connectionState = 'reconnecting';
+      if (this.room) { this.room.close(); this.room = null; }
+      await this.signaling.refreshIfNeeded();
+      const rtcConfig = await this.signaling.fetchIceConfig();
+      this._connectionState = 'negotiating';
+      const newPeer = new P2PRoom(false, this._baseUrl, {
+        rtcConfig,
+        onConnect: () => {
+          this._connectionState = 'connected';
+          this.setConnected?.(true);
+          this.onRoleChanged?.(false, m.hostEmail);
+          newPeer.getConnectionRoute().then(r => {
+            const label = r.kind === 'turn' ? 'TURN relay' : r.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
+            this.onConnected?.(label);
+          });
+        },
+        onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
+      });
+      const offerData = await this.signaling.request({ type: 'fetch-offer', token: m.token });
+      const aUrl = await newPeer.connectToHost(`${this._baseUrl}#sdp=${offerData.sdp}`);
+      this.room = newPeer;
+      const ab64 = aUrl.match(/#sdp=(.*)/)?.[1] || '';
+      this.signaling.send({ type: 'submit-answer', token: m.token, email: this.getEmail?.() ?? '', answerB64: ab64 });
+    });
   }
 
   get token(): string { return this._token; }
@@ -43,16 +96,19 @@ export class SessionController {
   get shareUrl(): string { return this._shareUrl; }
   get currentOfferId(): string { return this._currentOfferId; }
   get roomRef(): Room | null { return this.room; }
-  get isConnected(): boolean { return this.room !== null; }
+  get connectionState(): ConnectionState { return this._connectionState; }
+  get isConnected(): boolean { return this._connectionState === 'connected'; }
 
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
     let useRelay = false;
     try { await this.signaling.connect(); useRelay = true; } catch { this.onLog?.('system', '⚠️ Relay unavailable — manual mode'); }
 
-    // Fetch ICE config from relay (STUN first, TURN fallback)
+    // Refresh ICE credentials if near expiry, then fetch
+    await this.signaling.refreshIfNeeded();
     const rtcConfig = await this.signaling.fetchIceConfig();
 
+    this._connectionState = 'negotiating';
     const r = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
@@ -60,6 +116,10 @@ export class SessionController {
         const pe = this._peerEmails.get(peerId) || peerId;
         this._peerEmails.delete(peerId);
         this.onPeerLeave?.(pe);
+      },
+      onPeerConnect: (_peerId: string) => {
+        this._connectionState = 'connected';
+        this.setConnected?.(true);
       },
     });
     const { url, offerId } = await r.offerUrl();
@@ -73,12 +133,6 @@ export class SessionController {
     } else {
       this._shareUrl = `${this._baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
     }
-
-    // Permanent event listeners
-    this.signaling.on('peer-request', (m: any) => {
-      this.onLog?.('system', `📩 ${m.email} wants to join`);
-      this.onPendingRequest?.(m.email, m.token, m.offerId, m.answerB64);
-    });
 
     this.setupRoomHandlers(r, useRelay);
     return useRelay;
@@ -104,17 +158,16 @@ export class SessionController {
           // ignore
         } else {
           this.onChatMessage?.(sender, d.text);
-          r.broadcastExcept(encodeChat(`${sender}: ${d.text}`));
+          r.broadcastExcept(data);
         }
       }
     });
 
     r.onPeerJoin(async (peerId) => {
-      const pe = this._pendingPeerEmail || peerId;
+      const pe = peerId;
       this._peerEmails.set(peerId, pe);
-      this._pendingPeerEmail = '';
       this.setConnected?.(true);
-      this.onPeerJoin?.(pe);
+      this.onPeerJoin?.(peerId, pe);
       if (useRelay) {
         try {
           const { url: nu, offerId: noi } = await r.offerUrl();
@@ -128,16 +181,34 @@ export class SessionController {
     });
   }
 
-  // ── Host: accept answer (manual or auto with explicit offerId) ──
-  acceptAnswer(signalUrl: string, offerId?: string) {
-    const m = signalUrl.match(/#sdp=(.*)/);
-    const b64 = m ? decodeURIComponent(m[1]) : signalUrl;
-    this.room?.acceptAnswer(offerId || this._currentOfferId, `#sdp=${b64}`);
+  // ── Host: approve peer (validate, accept answer, signal relay) ──
+  approvePeer(request: { email: string; token: string; offerId: string; answerB64: string }): void {
+    // 1. Validate all fields
+    if (!request.email || !request.token || !request.offerId || !request.answerB64) {
+      this.onLog?.('system', 'ERROR: approvePeer missing required fields');
+      return;
+    }
+    // 2. Accept the answer with exact offerId
+    try {
+      this.room?.acceptAnswer(request.offerId, `#sdp=${request.answerB64}`);
+    } catch (err: any) {
+      this.onLog?.('system', `ERROR: acceptAnswer failed: ${err.message}`);
+      return;
+    }
+    // 3. Only after acceptAnswer succeeds, send host-approve via signaling
+    this.signaling.send({ type: 'host-approve', token: request.token });
+    this.onLog?.('system', `✅ Approved ${request.email}`);
   }
 
-  // ── Host: approve / reject ──
-  approvePeer(token: string) { this.signaling.send({ type: 'host-approve', token }); }
+  // ── Host: reject ──
   rejectPeer(token: string) { this.signaling.send({ type: 'host-reject', token }); }
+
+  // ── Host (manual mode): accept answer URL directly ──
+  manualAcceptAnswer(signalUrl: string): void {
+    const m = signalUrl.match(/#sdp=(.*)/);
+    const b64 = m ? decodeURIComponent(m[1]) : signalUrl;
+    this.room?.acceptAnswer(this._currentOfferId, `#sdp=${b64}`);
+  }
 
   // ── Peer: parse URL ──
   parseRoomFromUrl(): string | null {
@@ -160,12 +231,21 @@ export class SessionController {
       const parts = parsed.split(':'); offerId = parts[1]; offerB64 = parts[2];
     }
 
-    // Fetch ICE config if not already cached
+    // Refresh ICE credentials if near expiry, then fetch
+    await this.signaling.refreshIfNeeded();
     const rtcConfig = await this.signaling.fetchIceConfig();
 
+    this._connectionState = 'negotiating';
     const peer = new P2PRoom(false, this._baseUrl, {
       rtcConfig,
-      onConnect: () => { import('./connection-diagnostics').then(m => m.getConnectionRoute(peer).then(r => this.onConnected?.(r))); },
+      onConnect: () => {
+        this._connectionState = 'connected';
+        this.setConnected?.(true);
+        peer.getConnectionRoute().then(r => {
+          const label = r.kind === 'turn' ? 'TURN relay' : r.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
+          this.onConnected?.(label);
+        });
+      },
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
     });
     const answerUrl = await peer.connectToHost(`${this._baseUrl}#sdp=${offerB64}`);
@@ -174,24 +254,6 @@ export class SessionController {
 
     if (useRelay) {
       this.signaling.send({ type: 'submit-answer', token: parsed, email, answerB64 });
-      this.signaling.on('approved', () => { this.setConnected?.(true); });
-      this.signaling.on('promotion-request', (m: any) => this.handlePromotionRequest(m));
-      this.signaling.on('new-host', async (m: any) => {
-        this.onLog?.('system', `🔄 New host: ${m.hostEmail} — reconnecting...`);
-        if (this.room) { this.room.close(); this.room = null; }
-        const rtcConfig = this.signaling.iceConfig || undefined;
-        const newPeer = new P2PRoom(false, this._baseUrl, {
-          ...(rtcConfig ? { rtcConfig } : {}),
-          onConnect: () => import('./connection-diagnostics').then(mod => mod.getConnectionRoute(newPeer).then(r => this.onConnected?.(r))),
-          onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
-        });
-        const offerData = await this.signaling.request({ type: 'fetch-offer', token: m.token });
-        const aUrl = await newPeer.connectToHost(`${this._baseUrl}#sdp=${offerData.sdp}`);
-        this.room = newPeer;
-        const ab64 = aUrl.match(/#sdp=(.*)/)?.[1] || '';
-        this.signaling.send({ type: 'submit-answer', token: m.token, email, answerB64: ab64 });
-        this.signaling.on('approved', () => { this.setConnected?.(true); this.onRoleChanged?.(false, m.hostEmail); });
-      });
     }
 
     peer.onMessage((data) => {
@@ -209,7 +271,7 @@ export class SessionController {
   }
 
   // ── Promote peer ──
-  async promotePeer(targetEmail: string, users: Participant[], rtcConfig: any, getYDoc: () => any, getYText: () => any) {
+  async promotePeer(targetEmail: string) {
     if (this.promotionInProgress) return;
     this.promotionInProgress = true;
     this.onLog?.('system', `👑 Promoting ${targetEmail} to host...`);
@@ -228,10 +290,11 @@ export class SessionController {
     if (!this.room) return;
     this.onLog?.('system', `👑 Promotion request from ${msg.oldHostEmail}`);
 
-    // Use cached ICE config (fetched from relay on initial connect)
-    const rtcConfig = this.signaling.iceConfig || undefined;
+    // Refresh ICE credentials if near expiry
+    await this.signaling.refreshIfNeeded();
+    const rtcConfig = await this.signaling.fetchIceConfig();
     this.nextRoom = new P2PRoom(true, this._baseUrl, {
-      ...(rtcConfig ? { rtcConfig } : {}),
+      rtcConfig,
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
     });
 
@@ -248,25 +311,22 @@ export class SessionController {
       reconnectTokens[p.email] = resp.token;
     }
 
-    // Commit
+    // Commit — response IS the promotion-committed message
     try {
-      await this.signaling.request({
+      const result = await this.signaling.request({
         type: 'commit-promotion', roomId: msg.roomId, promotionId: msg.promotionId,
-        reconnectTokens, requestId: crypto.randomUUID(),
+        reconnectTokens,
       });
-      // on promotion-committed, switch role
-      this.signaling.on('promotion-committed', (m: any) => {
-        if (m.promotionId === msg.promotionId) {
-          this.onLog?.('system', '✅ Now hosting the room');
-          if (this.room) this.room.close();
-          this.room = this.nextRoom;
-          this.nextRoom = null;
-          this._roomId = msg.roomId;
-          this.setupRoomHandlers(this.room!, true);
-          this.onRoleChanged?.(true, msg.hostEmail || this.getEmail?.() || '');
-          this.promotionInProgress = false;
-        }
-      });
+      // result.promotionId matches msg.promotionId — switch role now
+      this.onLog?.('system', '✅ Now hosting the room');
+      if (this.room) this.room.close();
+      this.room = this.nextRoom;
+      this.nextRoom = null;
+      this._roomId = msg.roomId;
+      this._connectionState = 'connected';
+      this.setupRoomHandlers(this.room!, true);
+      this.onRoleChanged?.(true, msg.hostEmail || this.getEmail?.() || '');
+      this.promotionInProgress = false;
     } catch (err: any) {
       this.onLog?.('system', `❌ Commit failed: ${err.message}`);
       this.nextRoom?.close(); this.nextRoom = null;
@@ -274,14 +334,11 @@ export class SessionController {
     }
   }
 
-  get pendingPeerEmail() { return this._pendingPeerEmail; }
-  set pendingPeerEmail(e: string) { this._pendingPeerEmail = e; }
-
   sendFeature(data: Uint8Array) { this.room?.send(encodeYjs(data)); }
+  sendFeatureDataToPeer(peerId: string, data: Uint8Array) { this.room?.sendToPeer(peerId, encodeYjs(data)); }
   sendControl(msg: string) { this.room?.send(encodeChat(msg)); }
   sendChatMessage(text: string) {
-    const prefix = this.getEmail?.() || 'anonymous';
-    this.room?.send(encodeChat(`${prefix}: ${text}`));
+    this.room?.send(encodeChat(text));
   }
   close() { this.room?.close(); this.signaling.close(); }
 }

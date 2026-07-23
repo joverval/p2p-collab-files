@@ -1,14 +1,48 @@
 // Signaling client v2 — permanent WS router with requestId + event subscriptions
 
-const WS_URL = 'wss://relay.joverval.cl';
-const HTTP_URL = 'https://relay.joverval.cl';
+import type { IceConfigProvider } from '../shared/types';
 
-export class SignalingClient {
+const WS_URL = import.meta.env.VITE_SIGNAL_WS_URL || 'wss://relay.joverval.cl';
+const HTTP_URL = import.meta.env.VITE_SIGNAL_HTTP_URL || 'https://relay.joverval.cl';
+
+export class SignalingClient implements IceConfigProvider {
   private ws: WebSocket | null = null;
   private pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: any }>();
   private handlers = new Map<string, Set<(msg: any) => void>>();
   private connected = false;
   private _iceConfig: RTCConfiguration | null = null;
+  private _iceConfigExpiry = 0; // epoch ms when credentials expire
+
+  /** Validate that an incoming message has required fields for its type. Logs invalid messages. */
+  static validateMessage(msg: any): boolean {
+    if (!msg || typeof msg !== 'object') { console.warn('[signaling] invalid message — not an object', msg); return false; }
+    if (!msg.type) { console.warn('[signaling] invalid message — missing type', msg); return false; }
+    // Validate known message types
+    switch (msg.type) {
+      case 'peer-request':
+        if (!msg.email || !msg.token || !msg.offerId || !msg.answerB64) {
+          console.warn('[signaling] invalid peer-request — missing required fields', msg);
+          return false;
+        }
+        break;
+      case 'approved':
+        // no required fields beyond 'type'
+        break;
+      case 'promotion-request':
+        if (!msg.oldHostEmail || !msg.roomId || !msg.promotionId) {
+          console.warn('[signaling] invalid promotion-request — missing required fields', msg);
+          return false;
+        }
+        break;
+      case 'new-host':
+        if (!msg.hostEmail || !msg.token) {
+          console.warn('[signaling] invalid new-host — missing required fields', msg);
+          return false;
+        }
+        break;
+    }
+    return true;
+  }
 
   connect(timeoutMs = 3000): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -18,12 +52,12 @@ export class SignalingClient {
       s.onerror = () => { clearTimeout(timer); reject(new Error('WS connection failed')); };
       s.onclose = () => { this.ws = null; this.connected = false; };
       s.onmessage = (e) => {
-        try { const m = JSON.parse(e.data); this.dispatch(m); } catch {}
+        try { const m = JSON.parse(e.data); if (SignalingClient.validateMessage(m)) this.dispatch(m); } catch {}
       };
     });
   }
 
-  /** Fetch ICE servers from relay HTTP API. Cached — only fetches once per session. */
+  /** Fetch ICE servers from relay HTTP API. Cached — only fetches once per session. Tracks TTL from API response. */
   async fetchIceConfig(): Promise<RTCConfiguration> {
     if (this._iceConfig) return this._iceConfig;
     try {
@@ -35,6 +69,9 @@ export class SignalingClient {
         iceCandidatePoolSize: data.iceCandidatePoolSize ?? 2,
         iceTransportPolicy: (data.iceTransportPolicy as RTCIceTransportPolicy) || 'all',
       };
+      // Track TTL from API response (default 3600s) to support refreshIfNeeded
+      const ttlSeconds = data.ttl ?? 3600;
+      this._iceConfigExpiry = Date.now() + ttlSeconds * 1000;
     } catch {
       // Fallback if relay API is unavailable — STUN only, no TURN
       this._iceConfig = {
@@ -45,8 +82,24 @@ export class SignalingClient {
         iceCandidatePoolSize: 2,
         iceTransportPolicy: 'all',
       };
+      this._iceConfigExpiry = Infinity; // STUN-only never expires
     }
     return this._iceConfig;
+  }
+
+  /** Re-fetch ICE config if within 5 minutes of credential expiry. */
+  async refreshIfNeeded(): Promise<RTCConfiguration> {
+    const fiveMin = 5 * 60 * 1000;
+    if (Date.now() + fiveMin >= this._iceConfigExpiry) {
+      this._iceConfig = null; // force re-fetch
+      return this.fetchIceConfig();
+    }
+    return this._iceConfig!;
+  }
+
+  /** IceConfigProvider: get current config (may be null if never fetched). */
+  async getConfig(): Promise<RTCConfiguration> {
+    return this._iceConfig ?? this.fetchIceConfig();
   }
 
   get iceConfig(): RTCConfiguration | null { return this._iceConfig; }

@@ -5,7 +5,10 @@
     "moduleResolution": "bundler",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@joverval/p2p-collab": ["../p2p-collab/dist/index"]
+    }
   },
   "include": ["src"]
 }

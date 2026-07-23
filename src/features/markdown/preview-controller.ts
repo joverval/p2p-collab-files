@@ -1,6 +1,7 @@
 // Preview controller — markdown rendering with debounce
 
 import { $ } from '../../shared/dom';
+import DOMPurify from 'dompurify';
 import type * as Y from 'yjs';
 
 export class PreviewController {
@@ -21,6 +22,7 @@ export class PreviewController {
     this._dirty = false;
     if ($('preview').classList.contains('view-hidden')) return;
     const md = ytext.toString();
-    $('preview').innerHTML = (window as any).marked?.parse(md) || md.replace(/</g, '&lt;');
+    const rawHTML = (window as any).marked?.parse(md) || md.replace(/</g, '&lt;');
+    $('preview').innerHTML = DOMPurify.sanitize(rawHTML);
   }
 }

@@ -21,8 +21,8 @@ export function createEditor(
         const cursor = update.state.selection.main.head;
         const line = update.state.doc.lineAt(cursor);
         onCursorMove(line.number, update.state.doc.lines);
+        onDocChange();
       }
-      onDocChange();
     }),
     EditorView.theme({
       '&': { backgroundColor: '#0d1117' },

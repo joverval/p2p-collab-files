@@ -10,6 +10,15 @@ export function encodeChat(text: string): Uint8Array {
   return m;
 }
 
+export function encodeStructuredChat(sender: string, text: string): Uint8Array {
+  const payload = JSON.stringify({ type: 'chat', sender, text });
+  const e = new TextEncoder().encode(payload);
+  const m = new Uint8Array(1 + e.length);
+  m[0] = 0x00;
+  m.set(e, 1);
+  return m;
+}
+
 export function encodeYjs(data: Uint8Array, seq?: number): Uint8Array {
   if (seq === undefined) return encodeYjs(data, 0);
   const m = new Uint8Array(3 + data.length);

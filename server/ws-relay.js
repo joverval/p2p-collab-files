@@ -10,6 +10,10 @@ import { WebSocketServer } from 'ws';
 const PORT = Number(process.env.PORT || 8083);
 const TOKEN_TTL = 5 * 60 * 1000;
 const ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
+const GRACE_PERIOD = 10_000;       // 10s for host reconnect
+const CANDIDATE_TIMEOUT = 30_000;  // 30s for candidate to respond
+const HEARTBEAT_INTERVAL = 30_000;
+const PONG_TIMEOUT = 60_000;
 const TURN_ENABLED = process.env.TURN_ENABLED === '1' || process.env.TURN_ENABLED === 'true' || true;
 let TURN_HOST = process.env.TURN_HOST || '';
 const TURN_PORT = Number(process.env.TURN_PORT || 3478);
@@ -41,17 +45,84 @@ function genRoomId() {
 
 // ── Room state ──
 
-/** @type {Map<string, {roomId: string, hostWs: WebSocket|null, participants: Map<string,{ws:WebSocket,email:string,role:string,pendingRequestWs?:WebSocket}>, offers: Map<string,{sdp:string,offerId:string,intendedEmail?:string}>, created: number}>} */
+/** @type {Map<string, {roomId: string, hostWs: WebSocket|null, participants: Map<string,{ws:WebSocket,email:string,role:string,pendingRequestWs?:WebSocket}>, offers: Map<string,{sdp:string,offerId:string,intendedEmail?:string}>, created: number, members: Map<string,{email:string,ws:WebSocket,joinOrder:number}>, lastActivityAt: number, graceTimer?: NodeJS.Timeout, pendingPromotion?: {promotionId:string,targetEmail:string,candidateWs:WebSocket,timer:NodeJS.Timeout}}>} */
 const rooms = new Map();
 
 /** @type {Map<string, {roomId: string, role: string}>} */
 const tokenRoom = new Map();
 
-function createRoom(hostWs) {
+function createRoom(hostWs, hostEmail) {
   const roomId = genRoomId();
-  const room = { roomId, hostWs, participants: new Map(), offers: new Map(), created: Date.now() };
+  const normalizedEmail = hostEmail ? hostEmail.trim().toLowerCase() : 'host';
+  const room = {
+    roomId,
+    hostWs,
+    participants: new Map(),
+    offers: new Map(),
+    created: Date.now(),
+    members: new Map(),
+    lastActivityAt: Date.now(),
+  };
+  room.members.set(normalizedEmail, { email: normalizedEmail, ws: hostWs, joinOrder: 1 });
   rooms.set(roomId, room);
   return room;
+}
+
+function normalizeEmail(email) {
+  return (email || '').trim().toLowerCase();
+}
+
+// ── Message validation ──
+
+/**
+ * Validates an incoming message has required fields.
+ * Returns an error string, or null if valid.
+ */
+function validateMessage(msg) {
+  if (!msg || typeof msg.type !== 'string') return 'Missing or invalid type';
+
+  switch (msg.type) {
+    case 'store-offer':
+      if (!msg.sdp) return 'store-offer: missing sdp';
+      if (!msg.offerId) return 'store-offer: missing offerId';
+      break;
+    case 'fetch-offer':
+      if (!msg.token) return 'fetch-offer: missing token';
+      break;
+    case 'submit-answer':
+      if (!msg.token) return 'submit-answer: missing token';
+      if (!msg.email) return 'submit-answer: missing email';
+      if (!msg.answerB64) return 'submit-answer: missing answerB64';
+      break;
+    case 'host-approve':
+    case 'host-reject':
+      if (!msg.token) return `${msg.type}: missing token`;
+      break;
+    case 'become-host':
+      if (!msg.oldToken) return 'become-host: missing oldToken';
+      break;
+    case 'store-offer-next':
+      if (!msg.roomId) return 'store-offer-next: missing roomId';
+      if (!msg.sdp) return 'store-offer-next: missing sdp';
+      if (!msg.offerId) return 'store-offer-next: missing offerId';
+      break;
+    case 'promote-peer':
+      if (!msg.roomId) return 'promote-peer: missing roomId';
+      if (!msg.targetEmail) return 'promote-peer: missing targetEmail';
+      break;
+    case 'store-promotion-offer':
+      if (!msg.roomId) return 'store-promotion-offer: missing roomId';
+      if (!msg.sdp) return 'store-promotion-offer: missing sdp';
+      if (!msg.offerId) return 'store-promotion-offer: missing offerId';
+      break;
+    case 'commit-promotion':
+      if (!msg.roomId) return 'commit-promotion: missing roomId';
+      if (!msg.promotionId) return 'commit-promotion: missing promotionId';
+      break;
+    default:
+      return `Unknown message type: ${msg.type}`;
+  }
+  return null;
 }
 
 function sendJson(ws, msg) {
@@ -63,11 +134,85 @@ function respond(ws, base, requestId) {
   sendJson(ws, base);
 }
 
+// ── Auto host failover ──
+
+/**
+ * Deterministically select a successor and initiate promotion.
+ * Selects the first active peer by joinOrder (lowest first).
+ * Excludes the departed host.
+ */
+function initiateAutoFailover(room, departedHostEmail) {
+  // Collect active peers, sorted by joinOrder
+  const candidates = [];
+  for (const [, member] of room.members) {
+    if (member.email === departedHostEmail) continue; // skip departed host
+    if (member._failed) continue; // skip previously timed-out candidates
+    if (member.ws.readyState !== 1) continue;
+    // Verify this member is a peer participant
+    const isPeer = [...room.participants.values()].some(
+      p => p.email === member.email && p.role === 'peer' && p.ws === member.ws
+    );
+    if (isPeer) {
+      candidates.push(member);
+    }
+  }
+  candidates.sort((a, b) => a.joinOrder - b.joinOrder);
+
+  if (candidates.length === 0) {
+    console.log(`[failover] room ${room.roomId}: no eligible candidates for failover`);
+    return;
+  }
+
+  const candidate = candidates[0];
+  console.log(`[failover] room ${room.roomId}: initiating auto promotion to ${candidate.email}`);
+
+  const promotionId = genToken();
+  const participantList = [];
+  for (const [, p] of room.participants) {
+    participantList.push({ email: p.email, isHost: p.role === 'host' });
+  }
+
+  const oldHostEmail = [...room.participants.values()].find(p => p.role === 'host')?.email || departedHostEmail;
+
+  // Send auto promotion-request to candidate
+  sendJson(candidate.ws, {
+    type: 'promotion-request',
+    roomId: room.roomId,
+    promotionId,
+    targetEmail: candidate.email,
+    oldHostEmail,
+    participants: participantList,
+    automatic: true,
+  });
+
+  // Set up candidate timeout
+  const timer = setTimeout(() => {
+    console.log(`[failover] room ${room.roomId}: candidate ${candidate.email} timed out`);
+    room.pendingPromotion = undefined;
+    // Mark candidate as dead and try next
+    candidate._failed = true;
+    initiateAutoFailover(room, departedHostEmail);
+  }, CANDIDATE_TIMEOUT);
+
+  room._promotion = { promotionId, targetEmail: candidate.email, oldHostEmail };
+  room.pendingPromotion = { promotionId, targetEmail: candidate.email, candidateWs: candidate.ws, timer };
+  room.lastActivityAt = Date.now();
+}
+
+// ── WebSocket heartbeat tracking ──
+const wsMeta = new WeakMap(); // ws -> { lastPong: number }
+
 // Cleanup expired rooms
 setInterval(() => {
   const now = Date.now();
   for (const [roomId, room] of rooms) {
     if (now - room.created > TOKEN_TTL) {
+      // Cancel any pending failover
+      if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = undefined; }
+      if (room.pendingPromotion) {
+        clearTimeout(room.pendingPromotion.timer);
+        room.pendingPromotion = undefined;
+      }
       for (const [, p] of room.participants) {
         try { p.ws.close(); } catch {}
         if (p.pendingRequestWs) try { p.pendingRequestWs.close(); } catch {}
@@ -135,23 +280,55 @@ const server = http.createServer((req, res) => {
 // ── WebSocket server ──
 const wss = new WebSocketServer({ server });
 
+// Periodic heartbeat: ping all clients, terminate dead ones
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      wsMeta.delete(ws);
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on('close', () => clearInterval(heartbeatInterval));
+
 wss.on('connection', (ws) => {
+  // ── Heartbeat tracking ──
+  wsMeta.set(ws, { lastPong: Date.now() });
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    const meta = wsMeta.get(ws);
+    if (meta) meta.lastPong = Date.now();
+    ws.isAlive = true;
+  });
+
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+    // ── Validate EVERY incoming message ──
+    const validationError = validateMessage(msg);
+    if (validationError) {
+      respond(ws, { type: 'error', message: validationError }, msg.requestId);
+      return;
+    }
 
     const requestId = msg.requestId;
 
     switch (msg.type) {
       // ── store-offer (creates room) ──
       case 'store-offer': {
-        const room = createRoom(ws);
+        const normalizedEmail = normalizeEmail(msg.hostEmail);
+        const room = createRoom(ws, normalizedEmail);
         const offerToken = genToken();
         room.offers.set(offerToken, { sdp: msg.sdp, offerId: msg.offerId });
         tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host' });
         // Register host as participant
         const hostToken = 'host:' + genToken();
-        room.participants.set(hostToken, { ws, email: msg.hostEmail || 'Host', role: 'host' });
+        room.participants.set(hostToken, { ws, email: normalizedEmail, role: 'host' });
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'token', token: offerToken, roomId: room.roomId, offerId: msg.offerId }, requestId);
         break;
       }
@@ -164,6 +341,7 @@ wss.on('connection', (ws) => {
         if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
         const offer = room.offers.get(msg.token);
         if (!offer) { respond(ws, { type: 'error', message: 'Offer not found' }, requestId); return; }
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'offer', sdp: offer.sdp, offerId: offer.offerId, roomId: room.roomId }, requestId);
         break;
       }
@@ -175,15 +353,28 @@ wss.on('connection', (ws) => {
         const room = rooms.get(info.roomId);
         if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
+        const normalizedEmail = normalizeEmail(msg.email);
+
         // Generate unique peer token for approve/reject
         const peerToken = genToken();
         room.participants.set(peerToken, {
           ws,
-          email: msg.email,
+          email: normalizedEmail,
           role: 'peer',
           pendingRequestWs: ws,
         });
         tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer' });
+
+        // Track member with join order
+        const existingMember = room.members.get(normalizedEmail);
+        if (!existingMember) {
+          let maxOrder = 0;
+          for (const [, m] of room.members) { if (m.joinOrder > maxOrder) maxOrder = m.joinOrder; }
+          room.members.set(normalizedEmail, { email: normalizedEmail, ws, joinOrder: maxOrder + 1 });
+        } else {
+          existingMember.ws = ws;
+        }
+        room.lastActivityAt = Date.now();
 
         // Notify host with the peer-specific token
         if (room.hostWs && room.hostWs.readyState === 1) {
@@ -191,7 +382,7 @@ wss.on('connection', (ws) => {
           room.hostWs.send(JSON.stringify({
             type: 'peer-request',
             token: peerToken,
-            email: msg.email,
+            email: normalizedEmail,
             offerId: offer?.offerId,
             answerB64: msg.answerB64,
             roomId: room.roomId,
@@ -204,31 +395,36 @@ wss.on('connection', (ws) => {
       // ── host-approve ──
       case 'host-approve': {
         const info = tokenRoom.get(msg.token);
-        if (!info) return;
+        if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
         const room = rooms.get(info.roomId);
-        if (!room) return;
+        if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
         const participant = room.participants.get(msg.token);
         if (participant && participant.pendingRequestWs && participant.pendingRequestWs.readyState === 1) {
-          respond(participant.pendingRequestWs, { type: 'approved' });
+          respond(participant.pendingRequestWs, { type: 'approved' }, requestId);
         }
+        // Keep pendingRequestWs alive for promotion — just clear the pending flag
         if (participant) participant.pendingRequestWs = undefined;
+        room.lastActivityAt = Date.now();
+        respond(ws, { type: 'host-approve-ack' }, requestId);
         break;
       }
 
       // ── host-reject ──
       case 'host-reject': {
         const info = tokenRoom.get(msg.token);
-        if (!info) return;
+        if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
         const room = rooms.get(info.roomId);
-        if (!room) return;
+        if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
         const participant = room.participants.get(msg.token);
         if (participant) {
           if (participant.pendingRequestWs?.readyState === 1) {
-            respond(participant.pendingRequestWs, { type: 'rejected', message: 'Host rejected' });
+            respond(participant.pendingRequestWs, { type: 'rejected', message: 'Host rejected' }, requestId);
           }
           room.participants.delete(msg.token);
           tokenRoom.delete(msg.token);
         }
+        room.lastActivityAt = Date.now();
+        respond(ws, { type: 'host-reject-ack' }, requestId);
         break;
       }
 
@@ -238,6 +434,13 @@ wss.on('connection', (ws) => {
         if (!info) { respond(ws, { type: 'error', message: 'Old token not found' }, requestId); return; }
         const room = rooms.get(info.roomId);
         if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+        // Cancel any pending auto failover
+        if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = undefined; }
+        if (room.pendingPromotion) {
+          clearTimeout(room.pendingPromotion.timer);
+          room.pendingPromotion = undefined;
+        }
 
         for (const p of (msg.peers || [])) {
           if (p.isHost || p.email === msg.hostEmail) continue;
@@ -250,6 +453,7 @@ wss.on('connection', (ws) => {
           }
         }
         room.hostWs = ws;
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'become-ok', token: msg.oldToken }, requestId);
         break;
       }
@@ -258,9 +462,24 @@ wss.on('connection', (ws) => {
       case 'store-offer-next': {
         const room = msg.roomId ? rooms.get(msg.roomId) : null;
         if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+        // Cancel any pending auto failover (host reconnected)
+        if (room.graceTimer) {
+          clearTimeout(room.graceTimer);
+          room.graceTimer = undefined;
+          console.log(`[failover] room ${room.roomId}: host reconnected during grace period, canceling failover`);
+        }
+        if (room.pendingPromotion) {
+          clearTimeout(room.pendingPromotion.timer);
+          room.pendingPromotion = undefined;
+        }
+        // Reclaim host role
+        room.hostWs = ws;
+
         const nextToken = genToken();
         room.offers.set(nextToken, { sdp: msg.sdp, offerId: msg.offerId });
         tokenRoom.set(nextToken, { roomId: room.roomId, role: 'host' });
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'token', token: nextToken, offerId: msg.offerId, roomId: room.roomId }, requestId);
         break;
       }
@@ -274,9 +493,11 @@ wss.on('connection', (ws) => {
         const room = msg.roomId ? rooms.get(msg.roomId) : null;
         if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
+        const normalizedTarget = normalizeEmail(msg.targetEmail);
+
         let target = undefined;
         for (const [, p] of room.participants) {
-          if (p.email === msg.targetEmail && p.role === 'peer') { target = p; break; }
+          if (p.email === normalizedTarget && p.role === 'peer') { target = p; break; }
         }
         if (!target) { respond(ws, { type: 'error', message: 'Target peer not found' }, requestId); return; }
 
@@ -291,12 +512,18 @@ wss.on('connection', (ws) => {
           type: 'promotion-request',
           roomId: room.roomId,
           promotionId,
-          targetEmail: msg.targetEmail,
+          targetEmail: normalizedTarget,
           oldHostEmail,
           participants: participantList,
+          automatic: msg.automatic || false,
         });
 
-        room._promotion = { promotionId, targetEmail: msg.targetEmail, oldHostEmail };
+        room._promotion = { promotionId, targetEmail: normalizedTarget, oldHostEmail };
+        if (msg.automatic) {
+          room.pendingPromotion = { promotionId, targetEmail: normalizedTarget, candidateWs: target.ws, timer: null };
+          // Candidate timeout already handled in initiateAutoFailover
+        }
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'promotion-ack', promotionId }, requestId);
         break;
       }
@@ -314,6 +541,7 @@ wss.on('connection', (ws) => {
         });
         tokenRoom.set(token, { roomId: room.roomId, role: 'peer' });
 
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'token', token, offerId: msg.offerId, promotionId: msg.promotionId }, requestId);
         break;
       }
@@ -348,6 +576,14 @@ wss.on('connection', (ws) => {
           else if (p.email === promotion.oldHostEmail) p.role = 'peer';
         }
 
+        // Cancel pending promotion
+        if (room.pendingPromotion &&
+            room.pendingPromotion.promotionId === msg.promotionId) {
+          clearTimeout(room.pendingPromotion.timer);
+          room.pendingPromotion = undefined;
+        }
+
+        room.lastActivityAt = Date.now();
         respond(ws, { type: 'promotion-committed', promotionId: msg.promotionId }, requestId);
         delete room._promotion;
         break;
@@ -357,7 +593,24 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     for (const [roomId, room] of rooms) {
-      if (room.hostWs === ws) room.hostWs = null;
+      const wasHost = room.hostWs === ws;
+
+      if (wasHost) {
+        room.hostWs = null;
+        // Start grace period for host reconnect
+        const departedHostEmail = [...room.participants.values()]
+          .find(p => p.ws === ws)?.email || null;
+
+        if (departedHostEmail) {
+          console.log(`[failover] room ${roomId}: host ${departedHostEmail} disconnected, starting ${GRACE_PERIOD/1000}s grace period`);
+          room.graceTimer = setTimeout(() => {
+            room.graceTimer = undefined;
+            console.log(`[failover] room ${roomId}: grace period expired, initiating auto failover`);
+            initiateAutoFailover(room, departedHostEmail);
+          }, GRACE_PERIOD);
+        }
+      }
+
       for (const [token, p] of room.participants) {
         if (p.ws === ws) {
           room.participants.delete(token);
@@ -365,7 +618,11 @@ wss.on('connection', (ws) => {
           if (tokenRoom.get(token)?.role !== 'host') tokenRoom.delete(token);
         }
       }
+
+      // Remove from members if no other participant entry still uses this email
+      // (member tracking is primarily for failover; clean up when truly gone)
     }
+    wsMeta.delete(ws);
   });
 });
 
