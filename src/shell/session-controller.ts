@@ -38,7 +38,6 @@ export class SessionController {
   private _processedPromotionIds = new Set<string>();
   private _roomStateVersion = 0;
   private _lastRoomStateVersion = 0;
-  private _nextToken = '';
 
   // Callbacks
   onLog?: (type: string, text: string) => void;
@@ -212,18 +211,6 @@ export class SessionController {
     if (!request.email || !request.token || !request.offerId || !request.answerB64) {
       this.onLog?.('system', 'ERROR: approvePeer missing required fields');
       return;
-    }
-
-    // Kick off pre-generation BEFORE acceptAnswer so it runs during WebRTC negotiation.
-    // By the time onPeerJoin fires, _nextToken is ready for synchronous swap.
-    if (this.room) {
-      const r = this.room;
-      r.offerUrl().then(({ url, offerId }) => {
-        const sdp = url.match(/#sdp=(.*)/)?.[1] || '';
-        return this.signaling.request({ type: 'store-offer-next', roomId: this._roomId, sdp, offerId });
-      }).then(resp => {
-        this._nextToken = resp.token as string;
-      }).catch(err => this.onLog?.('system', `ERROR: ${(err as Error).message}`));
     }
 
     // 2. Accept the answer with exact offerId
