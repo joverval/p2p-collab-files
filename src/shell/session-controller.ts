@@ -50,7 +50,11 @@ export class SessionController {
     let useRelay = false;
     try { await this.signaling.connect(); useRelay = true; } catch { this.onLog?.('system', '⚠️ Relay unavailable — manual mode'); }
 
+    // Fetch ICE config from relay (STUN first, TURN fallback)
+    const rtcConfig = await this.signaling.fetchIceConfig();
+
     const r = new P2PRoom(true, this._baseUrl, {
+      rtcConfig,
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerLeave: (peerId: string) => {
         const pe = this._peerEmails.get(peerId) || peerId;
@@ -156,7 +160,11 @@ export class SessionController {
       const parts = parsed.split(':'); offerId = parts[1]; offerB64 = parts[2];
     }
 
+    // Fetch ICE config if not already cached
+    const rtcConfig = await this.signaling.fetchIceConfig();
+
     const peer = new P2PRoom(false, this._baseUrl, {
+      rtcConfig,
       onConnect: () => { import('./connection-diagnostics').then(m => m.getConnectionRoute(peer).then(r => this.onConnected?.(r))); },
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
     });
@@ -171,7 +179,9 @@ export class SessionController {
       this.signaling.on('new-host', async (m: any) => {
         this.onLog?.('system', `🔄 New host: ${m.hostEmail} — reconnecting...`);
         if (this.room) { this.room.close(); this.room = null; }
+        const rtcConfig = this.signaling.iceConfig || undefined;
         const newPeer = new P2PRoom(false, this._baseUrl, {
+          ...(rtcConfig ? { rtcConfig } : {}),
           onConnect: () => import('./connection-diagnostics').then(mod => mod.getConnectionRoute(newPeer).then(r => this.onConnected?.(r))),
           onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
         });
@@ -218,10 +228,10 @@ export class SessionController {
     if (!this.room) return;
     this.onLog?.('system', `👑 Promotion request from ${msg.oldHostEmail}`);
 
-    // Create nextRoom as host (keep old room open)
-    const rtcConfig = (window as any).__rtcConfig;
+    // Use cached ICE config (fetched from relay on initial connect)
+    const rtcConfig = this.signaling.iceConfig || undefined;
     this.nextRoom = new P2PRoom(true, this._baseUrl, {
-      ...((window as any).__rtcConfig ? { rtcConfig } : {}),
+      ...(rtcConfig ? { rtcConfig } : {}),
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
     });
 

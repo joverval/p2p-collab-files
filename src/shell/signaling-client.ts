@@ -1,12 +1,14 @@
 // Signaling client v2 — permanent WS router with requestId + event subscriptions
 
 const WS_URL = 'wss://relay.joverval.cl';
+const HTTP_URL = 'https://relay.joverval.cl';
 
 export class SignalingClient {
   private ws: WebSocket | null = null;
   private pending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: any }>();
   private handlers = new Map<string, Set<(msg: any) => void>>();
   private connected = false;
+  private _iceConfig: RTCConfiguration | null = null;
 
   connect(timeoutMs = 3000): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -20,6 +22,34 @@ export class SignalingClient {
       };
     });
   }
+
+  /** Fetch ICE servers from relay HTTP API. Cached — only fetches once per session. */
+  async fetchIceConfig(): Promise<RTCConfiguration> {
+    if (this._iceConfig) return this._iceConfig;
+    try {
+      const resp = await fetch(`${HTTP_URL}/turn-credentials`);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      this._iceConfig = {
+        iceServers: data.iceServers || [],
+        iceCandidatePoolSize: data.iceCandidatePoolSize ?? 2,
+        iceTransportPolicy: (data.iceTransportPolicy as RTCIceTransportPolicy) || 'all',
+      };
+    } catch {
+      // Fallback if relay API is unavailable — STUN only, no TURN
+      this._iceConfig = {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun.cloudflare.com:3478' },
+        ],
+        iceCandidatePoolSize: 2,
+        iceTransportPolicy: 'all',
+      };
+    }
+    return this._iceConfig;
+  }
+
+  get iceConfig(): RTCConfiguration | null { return this._iceConfig; }
 
   private dispatch(m: any) {
     // Resolve pending request
