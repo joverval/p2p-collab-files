@@ -55,35 +55,9 @@ export class SyncQueue {
   }
 }
 
-// ── Legacy module-level API (kept for backward compat) ──
-
-const legacyPendingUpdates: Uint8Array[] = [];
-let legacyPendingBytes = 0;
-let legacyFlushTimer: any = undefined;
-
 export function createDoc(): { ydoc: Y.Doc; ytext: Y.Text; undoManager: Y.UndoManager } {
   const ydoc = new Y.Doc();
   const ytext = ydoc.getText('document');
   const undoManager = new Y.UndoManager(ytext);
   return { ydoc, ytext, undoManager };
-}
-
-export function enqueueLocalUpdate(
-  update: Uint8Array,
-  sendFn: (data: Uint8Array) => void,
-  isConnected: () => boolean
-) {
-  legacyPendingUpdates.push(update);
-  legacyPendingBytes += update.byteLength;
-  if (legacyPendingBytes >= 48 * 1024 || legacyPendingUpdates.length >= 32) legacyFlush(sendFn, isConnected);
-  else if (!legacyFlushTimer) legacyFlushTimer = setTimeout(() => legacyFlush(sendFn, isConnected), 20);
-}
-
-function legacyFlush(sendFn: (data: Uint8Array) => void, isConnected: () => boolean) {
-  clearTimeout(legacyFlushTimer);
-  legacyFlushTimer = undefined;
-  if (!legacyPendingUpdates.length || !isConnected()) return;
-  const merged = Y.mergeUpdates(legacyPendingUpdates.splice(0));
-  legacyPendingBytes = 0;
-  sendFn(merged);
 }

@@ -1,4 +1,4 @@
-// app.ts — composition root v1.2
+// app.ts — composition root v1.3
 // Wires shell controllers + MarkdownFeature
 
 import './style.css';
@@ -18,11 +18,18 @@ export function createApplication() {
   const participants = new ParticipantsController();
   let isHost = false;
   const session = new SessionController();
-  const panel = new PanelController(chat, participants, () => isHost, () => session.isConnected);
+  let p2pConnected = false;
+  const panel = new PanelController(chat, participants, () => isHost, () => p2pConnected);
   const feature = new MarkdownFeature();
 
   let email = '';
   let editorReady = false;
+
+  // ── P2P connected state (real WebRTC, not relay-approved) ──
+  session.setConnected = (v) => {
+    p2pConnected = v;
+    if (v) ensureEditorVisible();
+  };
 
   // ── Helper for hidden diagnostic spans ──
   function setTextContent(id: string, text: string) {
@@ -32,13 +39,46 @@ export function createApplication() {
 
   // ── Chat send wiring ──
   panel.setSendChat((text: string) => {
-    chat.addLog('sent', isHost ? `[Host]: ${text}` : text);
+    chat.addLog(isHost ? 'host' : 'peer', text, email);
     session.sendChatMessage(text);
   });
 
   function updateTopBar() {
     $('topbar').style.display = 'flex';
     ($('user-count') as HTMLElement).textContent = String(participants.userCount());
+  }
+
+  function updateRoleAwareUI() {
+    updateTopBar();
+    panel.refresh();
+  }
+
+  function applyRoleState(host: boolean, hostEmail: string) {
+    isHost = host;
+    participants.allUsers = participants.allUsers.map(u => ({ ...u, isHost: u.email === hostEmail }));
+
+    // Host-only controls
+    ($('open-file-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
+    ($('copy-invite-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
+    ($('manual-answer-input') as HTMLInputElement).style.display = host ? '' : 'none';
+    ($('manual-answer-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
+
+    // Peer-only controls
+    ($('sync-btn') as HTMLButtonElement).style.display = host ? 'none' : '';
+
+    // Both roles can save
+    ($('save-file-btn') as HTMLButtonElement).disabled = false;
+
+    // Hide initial setup controls once room exists
+    ($('create-room-btn') as HTMLButtonElement).style.display = 'none';
+    ($('email-input') as HTMLInputElement).disabled = true;
+
+    // Role label in top bar
+    setTextContent('topbar-role', host ? '👑 Host' : '👤 Peer');
+
+    updateTopBar();
+    panel.refresh();
+    ensureEditorVisible();
   }
 
   function ensureEditorVisible() {
@@ -53,40 +93,49 @@ export function createApplication() {
 
     feature.start({
       isHost: () => isHost,
-      isConnected: () => session.isConnected,
+      isConnected: () => p2pConnected,
       sendFeatureData: (data) => session.sendFeature(data),
       sendFeatureDataToPeer: (peerId, data) => session.sendFeatureDataToPeer(peerId, data),
       sendControlMessage: (msg) => session.sendControl(msg),
       reportStatus: (msg) => chat.addLog('system', msg),
     });
+    feature.onConnected();
   }
 
   // ── Wire session → controllers ──
-  session.onLog = (type, text) => chat.addLog(type, text);
+  session.onLog = (type, text) => chat.addLog(type as 'host' | 'peer' | 'system', text);
 
-  session.onPendingRequest = (pEmail, token, offerId, answerB64) => {
-    participants.pendingPeerEmail = pEmail;
-    ($('toast-msg') as HTMLElement).textContent = `🔔 ${pEmail}`;
+  session.onPendingRequest = (req) => {
+    participants.pendingPeerEmail = req.email;
+    ($('toast-msg') as HTMLElement).textContent = `🔔 ${req.email}`;
     $('toast').style.display = 'flex';
     ($('toast-approve') as HTMLButtonElement).onclick = () => {
-      session.approvePeer({ email: pEmail, token, offerId: offerId!, answerB64: answerB64! });
+      session.approvePeer({ email: req.email, token: req.token, offerId: req.offerId, answerB64: req.answerB64 });
       $('toast').style.display = 'none';
-      chat.addLog('system', `✅ Approved ${pEmail}`);
+      chat.addLog('system', `✅ Approved ${req.email}`);
     };
     ($('toast-reject') as HTMLButtonElement).onclick = () => {
-      session.rejectPeer(token);
+      session.rejectPeer(req.token);
       $('toast').style.display = 'none';
     };
   };
 
   session.onPeerJoin = (peerId, peerEmail) => {
-    participants.allUsers = [...participants.allUsers, { email: peerEmail, isHost: false }];
+    participants.allUsers = [...participants.allUsers, {
+      email: peerEmail,
+      isHost: false,
+      participantId: peerId,
+      connected: true,
+      joinOrder: participants.allUsers.length + 1,
+    }];
     feature.onPeerJoined?.(peerId);
     updateTopBar();
+    session.broadcastRoomState(participants.allUsers);
   };
   session.onPeerLeave = (peerEmail) => {
     participants.allUsers = participants.allUsers.filter(u => u.email !== peerEmail);
     updateTopBar();
+    session.broadcastRoomState(participants.allUsers);
   };
   session.onConnected = (route) => {
     chat.addLog('system', `📡 Connected — ${route}`);
@@ -95,14 +144,16 @@ export function createApplication() {
     ensureEditorVisible();
   };
   session.onRoleChanged = (host, hostEmail) => {
-    isHost = host;
-    participants.allUsers = participants.allUsers.map(u => ({ ...u, isHost: u.email === hostEmail }));
-    updateTopBar();
+    applyRoleState(host, hostEmail);
+    session.broadcastRoomState(participants.allUsers);
   };
   session.onFeatureData = (data, peerId) => feature.handleFeatureData(data, peerId);
   session.onControlMessage = (text) => feature.handleControlMessage(text);
-  session.onChatMessage = (sender, text) => chat.addLog('received', `${sender}: ${text}`);
-  session.onRoomState = (peers) => { participants.allUsers = peers; updateTopBar(); };
+  session.onChatMessage = (sender, text, senderRole) => {
+    const role: 'host' | 'peer' | 'system' = (senderRole === 'host' || senderRole === 'peer' || senderRole === 'system') ? senderRole : 'peer';
+    chat.addLog(role, text, sender);
+  };
+  session.onRoomState = (peers) => { participants.replaceSnapshot(peers); updateRoleAwareUI(); };
   
   session.getEmail = () => email;
 
@@ -138,7 +189,7 @@ export function createApplication() {
   // Filename input → broadcast
   $('topbar-filename').addEventListener('input', () => {
     const name = ($('topbar-filename') as HTMLElement).textContent || 'Untitled.md';
-    if (isHost && session.isConnected) {
+    if (isHost && p2pConnected) {
       session.sendControl(`[FILENAME]${name}`);
     }
   });
@@ -162,7 +213,7 @@ export function createApplication() {
     email = ($('email-input') as HTMLInputElement).value.trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { chat.addLog('system', 'ERROR: Please enter a valid email'); return; }
     isHost = true;
-    participants.allUsers = [{ email, isHost: true }];
+    participants.allUsers = [{ email, isHost: true, participantId: 'host', connected: true, joinOrder: 1 }];
     updateTopBar();
     ($('email-input') as HTMLInputElement).disabled = true;
 
@@ -180,7 +231,7 @@ export function createApplication() {
       ($('manual-answer-input') as HTMLInputElement).style.display = '';
       ($('manual-answer-btn') as HTMLButtonElement).style.display = '';
       ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
-        session.manualAcceptAnswer(($('manual-answer-input') as HTMLInputElement).value.trim());
+        session.manualAcceptAnswer(session.currentOfferId, ($('manual-answer-input') as HTMLInputElement).value.trim());
       };
     }
   });
@@ -194,7 +245,7 @@ export function createApplication() {
       email = ($('email-input') as HTMLInputElement).value.trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { chat.addLog('system', 'ERROR: Please enter a valid email'); return; }
       ($('email-input') as HTMLInputElement).disabled = true;
-      participants.allUsers = [{ email, isHost: false }];
+      participants.allUsers = [{ email, isHost: false, participantId: 'self', connected: false, joinOrder: 0 }];
       await session.peerAutoJoin(parsed, email);
       ($('save-file-btn') as HTMLButtonElement).disabled = false;
       ($('open-file-btn') as HTMLButtonElement).style.display = 'none';

@@ -5,6 +5,9 @@ import { el } from '../../shared/dom';
 export interface Participant {
   email: string;
   isHost: boolean;
+  participantId: string;
+  connected: boolean;
+  joinOrder: number;
 }
 
 export class ParticipantsController {
@@ -19,6 +22,8 @@ export class ParticipantsController {
   get peerEmails(): Map<string, string> { return this._peerEmails; }
   set pendingPeerEmail(e: string) { this._pendingPeerEmail = e; }
   get pendingPeerEmail(): string { return this._pendingPeerEmail; }
+
+  replaceSnapshot(peers: Participant[]): void { this._allUsers = [...peers]; }
 
   userCount(): number { return this._allUsers.length; }
 

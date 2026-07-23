@@ -10,8 +10,8 @@ export function encodeChat(text: string): Uint8Array {
   return m;
 }
 
-export function encodeStructuredChat(sender: string, text: string): Uint8Array {
-  const payload = JSON.stringify({ type: 'chat', sender, text });
+export function encodeStructuredChat(sender: string, senderRole: string, text: string): Uint8Array {
+  const payload = JSON.stringify({ type: 'chat', sender, senderRole, text });
   const e = new TextEncoder().encode(payload);
   const m = new Uint8Array(1 + e.length);
   m[0] = 0x00;

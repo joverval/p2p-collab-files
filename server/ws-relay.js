@@ -9,7 +9,11 @@ import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const DEFAULT_PORT = Number(process.env.PORT || 8083);
-const DEFAULT_TOKEN_TTL = 5 * 60 * 1000;
+const DEFAULT_TOKEN_TTL = 5 * 60 * 1000;           // 5 min for individual tokens
+const DEFAULT_OFFER_TTL = 5 * 60 * 1000;           // 5 min for peer join offers
+const DEFAULT_ROOM_INACTIVITY_TTL = 30 * 60 * 1000; // 30 min inactivity before room cleanup
+const DEFAULT_PENDING_APPROVAL_TTL = 5 * 60 * 1000; // 5 min for host approval wait
+const DEFAULT_PROMOTION_TTL = 30 * 1000;            // 30s for promotion commit window
 const DEFAULT_ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
 const DEFAULT_GRACE_PERIOD = 10_000;       // 10s for host reconnect
 const DEFAULT_CANDIDATE_TIMEOUT = 30_000;  // 30s for candidate to respond
@@ -23,7 +27,11 @@ const DEFAULT_HEARTBEAT_INTERVAL = 30_000;
  * @param {() => number} [options.clock]    Injectable clock (for fake timers). Default: () => Date.now().
  * @param {() => string} [options.idGenerator]  Injectable ID generator. Default: crypto.randomBytes.
  * @param {string[]} [options.allowedOrigins]  CORS origins. Default: from APP_ORIGINS env.
- * @param {number} [options.tokenTTL]       Token/room TTL in ms. Default: 5 min.
+ * @param {number} [options.tokenTTL]       Token TTL in ms. Default: 5 min.
+ * @param {number} [options.offerTTL]        Offer TTL in ms. Default: 5 min.
+ * @param {number} [options.roomInactivityTTL] Room inactivity TTL in ms. Default: 30 min.
+ * @param {number} [options.pendingApprovalTTL] Pending approval TTL in ms. Default: 5 min.
+ * @param {number} [options.promotionTTL]     Promotion commit TTL in ms. Default: 30s.
  * @param {number} [options.gracePeriod]    Grace period for host reconnect in ms. Default: 10s.
  * @param {number} [options.candidateTimeout]  Candidate response timeout in ms. Default: 30s.
  * @param {number} [options.heartbeatInterval]  Heartbeat interval in ms. Default: 30s.
@@ -37,6 +45,10 @@ export function createRelayServer(options = {}) {
     idGenerator = () => crypto.randomBytes(18).toString('base64url'),
     allowedOrigins = DEFAULT_ALLOWED_ORIGINS,
     tokenTTL = DEFAULT_TOKEN_TTL,
+    offerTTL = DEFAULT_OFFER_TTL,
+    roomInactivityTTL = DEFAULT_ROOM_INACTIVITY_TTL,
+    pendingApprovalTTL = DEFAULT_PENDING_APPROVAL_TTL,
+    promotionTTL = DEFAULT_PROMOTION_TTL,
     gracePeriod = DEFAULT_GRACE_PERIOD,
     candidateTimeout = DEFAULT_CANDIDATE_TIMEOUT,
     heartbeatInterval = DEFAULT_HEARTBEAT_INTERVAL,
@@ -81,7 +93,7 @@ export function createRelayServer(options = {}) {
   /** @type {Map<string, object>} */
   const rooms = new Map();
 
-  /** @type {Map<string, {roomId: string, role: string}>} */
+  /** @type {Map<string, {roomId: string, role: string, createdAt: number}>} */
   const tokenRoom = new Map();
 
   function createRoom(hostWs, hostEmail) {
@@ -213,7 +225,7 @@ export function createRelayServer(options = {}) {
       initiateAutoFailover(room, departedHostEmail);
     }, candidateTimeout);
 
-    room._promotion = { promotionId, targetEmail: candidate.email, oldHostEmail };
+    room._promotion = { promotionId, targetEmail: candidate.email, oldHostEmail, _startedAt: clock() };
     room.pendingPromotion = { promotionId, targetEmail: candidate.email, candidateWs: candidate.ws, timer };
     room.lastActivityAt = clock();
   }
@@ -317,7 +329,7 @@ export function createRelayServer(options = {}) {
           const room = createRoom(ws, normalizedEmail);
           const offerToken = genToken();
           room.offers.set(offerToken, { sdp: msg.sdp, offerId: msg.offerId });
-          tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host' });
+          tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host', createdAt: clock() });
           const hostToken = 'host:' + genToken();
           room.participants.set(hostToken, { ws, email: normalizedEmail, role: 'host' });
           room.lastActivityAt = clock();
@@ -353,8 +365,9 @@ export function createRelayServer(options = {}) {
             email: normalizedEmail,
             role: 'peer',
             pendingRequestWs: ws,
+            _pendingSince: clock(),
           });
-          tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer' });
+          tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer', createdAt: clock() });
 
           const existingMember = room.members.get(normalizedEmail);
           if (!existingMember) {
@@ -463,7 +476,7 @@ export function createRelayServer(options = {}) {
 
           const nextToken = genToken();
           room.offers.set(nextToken, { sdp: msg.sdp, offerId: msg.offerId });
-          tokenRoom.set(nextToken, { roomId: room.roomId, role: 'host' });
+          tokenRoom.set(nextToken, { roomId: room.roomId, role: 'host', createdAt: clock() });
           room.lastActivityAt = clock();
           respond(ws, { type: 'token', token: nextToken, offerId: msg.offerId, roomId: room.roomId }, requestId);
           break;
@@ -503,7 +516,7 @@ export function createRelayServer(options = {}) {
             automatic: msg.automatic || false,
           });
 
-          room._promotion = { promotionId, targetEmail: normalizedTarget, oldHostEmail };
+          room._promotion = { promotionId, targetEmail: normalizedTarget, oldHostEmail, _startedAt: clock() };
           if (msg.automatic) {
             room.pendingPromotion = { promotionId, targetEmail: normalizedTarget, candidateWs: target.ws, timer: null };
           }
@@ -523,7 +536,7 @@ export function createRelayServer(options = {}) {
             offerId: msg.offerId,
             intendedEmail: msg.intendedEmail,
           });
-          tokenRoom.set(token, { roomId: room.roomId, role: 'peer' });
+          tokenRoom.set(token, { roomId: room.roomId, role: 'peer', createdAt: clock() });
 
           room.lastActivityAt = clock();
           respond(ws, { type: 'token', token, offerId: msg.offerId, promotionId: msg.promotionId }, requestId);
@@ -610,11 +623,74 @@ export function createRelayServer(options = {}) {
     });
   });
 
-  // ── Cleanup expired rooms ──
+  // ── Cleanup: expire tokens, stale rooms, pending approvals, and promotions ──
+  function hasActiveSocket(room) {
+    for (const [, p] of room.participants) {
+      if (p.ws && p.ws.readyState === 1) return true;
+    }
+    return false;
+  }
+
   const cleanupInterval = setInterval(() => {
     const now = clock();
+
+    // Expire individual tokens past their TTL
+    for (const [tk, info] of tokenRoom) {
+      if (now - info.createdAt > tokenTTL) {
+        tokenRoom.delete(tk);
+        // Also clean up the corresponding participant if no other tokens reference it
+        const room = rooms.get(info.roomId);
+        if (room) {
+          room.offers.delete(tk);
+          const participant = room.participants.get(tk);
+          if (participant && ![...tokenRoom.values()].some(v => {
+            for (const [, p] of room.participants) {
+              if (p === participant && p !== room.participants.get(tk)) return true;
+            }
+            return false;
+          })) {
+            room.participants.delete(tk);
+          }
+        }
+      }
+    }
+
+    // Expire rooms based on inactivity
     for (const [roomId, room] of rooms) {
-      if (now - room.created > tokenTTL) {
+      // Expire pending approvals past their TTL
+      for (const [tk, p] of room.participants) {
+        if (p.pendingRequestWs && p._pendingSince) {
+          if (now - p._pendingSince > pendingApprovalTTL) {
+            if (p.pendingRequestWs.readyState === 1) {
+              sendJson(p.pendingRequestWs, { type: 'error', message: 'Approval timed out' });
+            }
+            p.pendingRequestWs = undefined;
+            p._pendingSince = undefined;
+            room.participants.delete(tk);
+            tokenRoom.delete(tk);
+          }
+        }
+      }
+
+      // Expire promotion if past TTL
+      if (room._promotion && room._promotion._startedAt) {
+        if (now - room._promotion._startedAt > promotionTTL) {
+          delete room._promotion;
+          if (room.pendingPromotion) {
+            clearTimeout(room.pendingPromotion.timer);
+            room.pendingPromotion = undefined;
+          }
+        }
+      }
+
+      // Skip active rooms (have connected sockets)
+      if (hasActiveSocket(room)) {
+        room.lastActivityAt = now; // bump activity to prevent premature expiry
+        continue;
+      }
+
+      // Expire inactive rooms
+      if (now - room.lastActivityAt > roomInactivityTTL) {
         if (room.graceTimer) { clearTimeout(room.graceTimer); room.graceTimer = undefined; }
         if (room.pendingPromotion) {
           clearTimeout(room.pendingPromotion.timer);

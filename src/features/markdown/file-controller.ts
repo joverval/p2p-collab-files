@@ -21,7 +21,7 @@ export class FileController {
     private onFilenameBroadcast: (name: string) => void,
   ) {}
 
-  async openFile(ydoc: Y.Doc, ytext: Y.Text, editorView: EditorView | null) {
+  async openFile(ydoc: Y.Doc, ytext: Y.Text, _editorView: EditorView | null) {
     if (!this.isHost() || !ydoc) return;
     try {
       let name: string, c: string;

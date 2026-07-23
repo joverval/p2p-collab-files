@@ -14,31 +14,34 @@ export interface Room {
   getConnectionRoute(): Promise<{ kind: string; local?: string; remote?: string }>;
 }
 
+// Use explicit function type for vitest mocks to avoid TS2348
+type Fn = (...args: any[]) => any;
+
 export type MockRoom = Room & {
-  _offerUrl: ReturnType<typeof vi.fn>;
-  _connectToHost: ReturnType<typeof vi.fn>;
-  _acceptAnswer: ReturnType<typeof vi.fn>;
-  _onMessage: ReturnType<typeof vi.fn>;
-  _broadcastExcept: ReturnType<typeof vi.fn>;
-  _send: ReturnType<typeof vi.fn>;
-  _sendToPeer: ReturnType<typeof vi.fn>;
-  _close: ReturnType<typeof vi.fn>;
-  _getConnectionRoute: ReturnType<typeof vi.fn>;
+  _offerUrl: ReturnType<typeof vi.fn<Fn>>;
+  _connectToHost: ReturnType<typeof vi.fn<Fn>>;
+  _acceptAnswer: ReturnType<typeof vi.fn<Fn>>;
+  _onMessage: ReturnType<typeof vi.fn<Fn>>;
+  _broadcastExcept: ReturnType<typeof vi.fn<Fn>>;
+  _send: ReturnType<typeof vi.fn<Fn>>;
+  _sendToPeer: ReturnType<typeof vi.fn<Fn>>;
+  _close: ReturnType<typeof vi.fn<Fn>>;
+  _getConnectionRoute: ReturnType<typeof vi.fn<Fn>>;
   _onPeerJoinCb: ((peerId: string) => void) | null;
   _messageCb: ((data: Uint8Array, peerId: string) => void) | null;
 };
 
 export function createMockRoom(): MockRoom {
   const mock: MockRoom = {
-    _offerUrl: vi.fn(),
-    _connectToHost: vi.fn(),
-    _acceptAnswer: vi.fn(),
-    _onMessage: vi.fn(),
-    _broadcastExcept: vi.fn(),
-    _send: vi.fn(),
-    _sendToPeer: vi.fn(),
-    _close: vi.fn(),
-    _getConnectionRoute: vi.fn(),
+    _offerUrl: vi.fn<Fn>(),
+    _connectToHost: vi.fn<Fn>(),
+    _acceptAnswer: vi.fn<Fn>(),
+    _onMessage: vi.fn<Fn>(),
+    _broadcastExcept: vi.fn<Fn>(),
+    _send: vi.fn<Fn>(),
+    _sendToPeer: vi.fn<Fn>(),
+    _close: vi.fn<Fn>(),
+    _getConnectionRoute: vi.fn<Fn>(),
     _onPeerJoinCb: null,
     _messageCb: null,
 
@@ -65,15 +68,7 @@ export function createMockRoom(): MockRoom {
 
 // P2PRoom constructor mock
 export class P2PRoom implements Room {
-  private _isHost: boolean;
-  private _baseUrl: string;
-  private _opts: any;
-
-  constructor(isHost: boolean, baseUrl: string, opts?: any) {
-    this._isHost = isHost;
-    this._baseUrl = baseUrl;
-    this._opts = opts;
-  }
+  constructor(_isHost: boolean, _baseUrl: string, _opts?: any) {}
 
   offerUrl() { return Promise.resolve({ url: '', offerId: '' }); }
   connectToHost(_url: string) { return Promise.resolve(''); }

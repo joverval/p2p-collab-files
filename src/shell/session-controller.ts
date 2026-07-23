@@ -3,11 +3,23 @@
 
 import { P2PRoom } from '@joverval/p2p-collab';
 import type { Room } from '@joverval/p2p-collab';
-import { encodeChat, encodeYjs, decodeMessage } from './protocol/message-envelope';
+import { encodeChat, encodeStructuredChat, encodeYjs, decodeMessage } from './protocol/message-envelope';
 import type { Participant } from './participants/participants-controller';
 import { SignalingClient } from './signaling-client';
 
 export type ConnectionState = 'idle' | 'signaling' | 'negotiating' | 'connected' | 'reconnecting' | 'failed' | 'closed';
+
+/** Try to parse a received chat payload as a structured JSON envelope.
+ *  Returns {sender, text, senderRole} on success, null on failure (plain text / control message). */
+function tryParseChatEnvelope(raw: string): { sender: string; text: string; senderRole: string } | null {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.type === 'chat' && typeof parsed.sender === 'string' && typeof parsed.text === 'string') {
+      return { sender: parsed.sender, text: parsed.text, senderRole: parsed.senderRole || 'unknown' };
+    }
+  } catch { /* not JSON — plain text or control message */ }
+  return null;
+}
 
 export class SessionController {
   private signaling = new SignalingClient();
@@ -22,16 +34,20 @@ export class SessionController {
   private promotionInProgress = false;
   private _connectionState: ConnectionState = 'idle';
   private _permanentHandlersRegistered = false;
+  private _isHost = false;
+  private _processedPromotionIds = new Set<string>();
+  private _roomStateVersion = 0;
+  private _lastRoomStateVersion = 0;
 
   // Callbacks
   onLog?: (type: string, text: string) => void;
-  onPendingRequest?: (email: string, token: string, offerId?: string, answerB64?: string) => void;
+  onPendingRequest?: (request: { email: string; token: string; offerId: string; answerB64: string }) => void;
   onConnected?: (route: string) => void;
   onPeerJoin?: (peerId: string, peerEmail: string) => void;
   onPeerLeave?: (email: string) => void;
   onFeatureData?: (data: Uint8Array, peerId: string) => void;
   onControlMessage?: (text: string) => void;
-  onChatMessage?: (sender: string, text: string) => void;
+  onChatMessage?: (sender: string, text: string, senderRole?: string) => void;
   onRoomState?: (peers: Participant[]) => void;
   onRoleChanged?: (isHost: boolean, hostEmail: string) => void;
   getEmail?: () => string;
@@ -50,13 +66,12 @@ export class SessionController {
     // Host side: peer join request
     this.signaling.on('peer-request', (m: any) => {
       this.onLog?.('system', `📩 ${m.email} wants to join`);
-      this.onPendingRequest?.(m.email, m.token, m.offerId, m.answerB64);
+      this.onPendingRequest?.({ email: m.email, token: m.token, offerId: m.offerId, answerB64: m.answerB64 });
     });
 
-    // Peer side: host approval
+    // Peer side: host approval — relay approved, wait for actual P2P onConnect
     this.signaling.on('approved', () => {
-      this._connectionState = 'connected';
-      this.setConnected?.(true);
+      this.onLog?.('system', '👍 Host approved — waiting for P2P connection...');
     });
 
     // Peer side: promotion request from old host
@@ -66,7 +81,7 @@ export class SessionController {
     this.signaling.on('new-host', async (m: any) => {
       this.onLog?.('system', `🔄 New host: ${m.hostEmail} — reconnecting...`);
       this._connectionState = 'reconnecting';
-      if (this.room) { this.room.close(); this.room = null; }
+      const oldRoom = this.room; // keep old room alive during transition
       await this.signaling.refreshIfNeeded();
       const rtcConfig = await this.signaling.fetchIceConfig();
       this._connectionState = 'negotiating';
@@ -75,6 +90,9 @@ export class SessionController {
         onConnect: () => {
           this._connectionState = 'connected';
           this.setConnected?.(true);
+          this._lastRoomStateVersion = 0; // reset for new host's version counter
+          // Now close old room — replacement is connected
+          oldRoom?.close();
           this.onRoleChanged?.(false, m.hostEmail);
           newPeer.getConnectionRoute().then(r => {
             const label = r.kind === 'turn' ? 'TURN relay' : r.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
@@ -84,7 +102,7 @@ export class SessionController {
         onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       });
       const offerData = await this.signaling.request({ type: 'fetch-offer', token: m.token });
-      const aUrl = await newPeer.connectToHost(`${this._baseUrl}#sdp=${offerData.sdp}`);
+      const aUrl = await newPeer.connectToHost(`${this._baseUrl}#sdp=${offerData.sdp as string}`);
       this.room = newPeer;
       const ab64 = aUrl.match(/#sdp=(.*)/)?.[1] || '';
       this.signaling.send({ type: 'submit-answer', token: m.token, email: this.getEmail?.() ?? '', answerB64: ab64 });
@@ -101,6 +119,7 @@ export class SessionController {
 
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
+    this._isHost = true;
     let useRelay = false;
     try { await this.signaling.connect(); useRelay = true; } catch { this.onLog?.('system', '⚠️ Relay unavailable — manual mode'); }
 
@@ -128,7 +147,7 @@ export class SessionController {
 
     if (useRelay) {
       const resp = await this.signaling.request({ type: 'store-offer', sdp: sdpB64, offerId, hostEmail: email });
-      this._token = resp.token; this._roomId = resp.roomId;
+      this._token = resp.token as string; this._roomId = resp.roomId as string;
       this._shareUrl = `${this._baseUrl}#${this._token}`;
     } else {
       this._shareUrl = `${this._baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
@@ -149,15 +168,18 @@ export class SessionController {
         const sender = this._peerEmails.get(peerId) || peerId;
         if (d.text.startsWith('[EMAIL]')) {
           this._peerEmails.set(peerId, d.text.slice(7));
-        } else if (d.text.startsWith('[ROOM]')) {
-          try { const rd = JSON.parse(d.text.slice(5)); this.onRoomState?.(rd.peers); } catch {}
-          r.broadcastExcept(encodeChat(d.text));
         } else if (d.text.startsWith('[SYNC]') || d.text.startsWith('[FILENAME]')) {
           this.onControlMessage?.(d.text);
-        } else if (d.text.startsWith('[CHKSUM]')) {
-          // ignore
+        } else if (d.text.startsWith('[CHKSUM]') || d.text.startsWith('[ROOM]')) {
+          // ignore — host is the authority for room state, checksums are internal
         } else {
-          this.onChatMessage?.(sender, d.text);
+          const envelope = tryParseChatEnvelope(d.text);
+          if (envelope) {
+            this.onChatMessage?.(envelope.sender, envelope.text, envelope.senderRole);
+          } else {
+            // backward compat: plain text from old clients
+            this.onChatMessage?.(sender, d.text, 'unknown');
+          }
           r.broadcastExcept(data);
         }
       }
@@ -174,7 +196,7 @@ export class SessionController {
           this._currentOfferId = noi;
           const nuSdpB64 = nu.match(/#sdp=(.*)/)?.[1] || '';
           const resp = await this.signaling.request({ type: 'store-offer-next', roomId: this._roomId, sdp: nuSdpB64, offerId: noi });
-          this._token = resp.token;
+          this._token = resp.token as string;
           this._shareUrl = `${this._baseUrl}#${this._token}`;
         } catch (err: any) { this.onLog?.('system', `ERROR: ${err.message}`); }
       }
@@ -203,11 +225,11 @@ export class SessionController {
   // ── Host: reject ──
   rejectPeer(token: string) { this.signaling.send({ type: 'host-reject', token }); }
 
-  // ── Host (manual mode): accept answer URL directly ──
-  manualAcceptAnswer(signalUrl: string): void {
+  // ── Host (manual mode): accept answer URL with explicit offerId ──
+  manualAcceptAnswer(offerId: string, signalUrl: string): void {
     const m = signalUrl.match(/#sdp=(.*)/);
     const b64 = m ? decodeURIComponent(m[1]) : signalUrl;
-    this.room?.acceptAnswer(this._currentOfferId, `#sdp=${b64}`);
+    this.room?.acceptAnswer(offerId, `#sdp=${b64}`);
   }
 
   // ── Peer: parse URL ──
@@ -220,15 +242,16 @@ export class SessionController {
 
   // ── Peer: join ──
   async peerAutoJoin(parsed: string, email: string): Promise<void> {
-    let useRelay = false, offerB64 = '', offerId = '';
+    this._isHost = false;
+    let useRelay = false, offerB64 = '';
     const isToken = !parsed.startsWith('manual:');
     if (isToken) { try { await this.signaling.connect(); useRelay = true; } catch {} }
 
     if (useRelay) {
       const data = await this.signaling.request({ type: 'fetch-offer', token: parsed });
-      offerB64 = data.sdp; offerId = data.offerId; this._roomId = data.roomId;
+      offerB64 = data.sdp as string; this._roomId = data.roomId as string;
     } else {
-      const parts = parsed.split(':'); offerId = parts[1]; offerB64 = parts[2];
+      const parts = parsed.split(':'); offerB64 = parts[2];
     }
 
     // Refresh ICE credentials if near expiry, then fetch
@@ -262,10 +285,25 @@ export class SessionController {
       if (d.type === 'yjs') { this.onFeatureData?.(data, 'host'); }
       else {
         if (d.text.startsWith('[USERS]')) { try { const ud = JSON.parse(d.text.slice(7)); this.onRoomState?.(ud.users); } catch {} }
-        else if (d.text.startsWith('[ROOM]')) { try { const rd = JSON.parse(d.text.slice(5)); this.onRoomState?.(rd.peers); } catch {} }
+        else if (d.text.startsWith('[ROOM]')) {
+          try {
+            const rd = JSON.parse(d.text.slice(5));
+            const v: number = rd.v ?? 0;
+            if (v <= this._lastRoomStateVersion) return; // stale/duplicate
+            this._lastRoomStateVersion = v;
+            this.onRoomState?.(rd.peers);
+          } catch {}
+        }
         else if (d.text.startsWith('[FILENAME]') || d.text.startsWith('[SYNC]')) { this.onControlMessage?.(d.text); }
         else if (d.text.startsWith('[PROMOTE]')) { /* handled via relay promote-peer now */ }
-        else { this.onChatMessage?.('Host', d.text); }
+        else {
+          const envelope = tryParseChatEnvelope(d.text);
+          if (envelope) {
+            this.onChatMessage?.(envelope.sender, envelope.text, envelope.senderRole);
+          } else {
+            this.onChatMessage?.('Host', d.text, 'host');
+          }
+        }
       }
     });
   }
@@ -277,8 +315,10 @@ export class SessionController {
     this.onLog?.('system', `👑 Promoting ${targetEmail} to host...`);
 
     try {
-      const ack = await this.signaling.request({ type: 'promote-peer', roomId: this._roomId, targetEmail });
-      this.onLog?.('system', '📤 Promotion request sent');
+      await this.signaling.request({ type: 'promote-peer', roomId: this._roomId, targetEmail });
+      // Use response directly: promotion accepted by relay, old host transitions to peer now
+      this.onRoleChanged?.(false, targetEmail);
+      this.onLog?.('system', `📤 Promotion accepted — you are now a peer; ${targetEmail} is the new host`);
     } catch (err: any) {
       this.onLog?.('system', `❌ Promotion failed: ${err.message}`);
       this.promotionInProgress = false;
@@ -288,7 +328,13 @@ export class SessionController {
   // Called on target peer when receiving promotion-request
   private async handlePromotionRequest(msg: any) {
     if (!this.room) return;
-    this.onLog?.('system', `👑 Promotion request from ${msg.oldHostEmail}`);
+
+    // Idempotency: skip duplicate promotion IDs (relay may re-send on reconnect)
+    if (this._processedPromotionIds.has(msg.promotionId)) {
+      this.onLog?.('system', `⏭️ Skipping duplicate promotion ${msg.promotionId}`);
+      return;
+    }
+    this._processedPromotionIds.add(msg.promotionId);
 
     // Refresh ICE credentials if near expiry
     await this.signaling.refreshIfNeeded();
@@ -308,23 +354,25 @@ export class SessionController {
         type: 'store-promotion-offer', roomId: msg.roomId, promotionId: msg.promotionId,
         intendedEmail: p.email, sdp, offerId,
       });
-      reconnectTokens[p.email] = resp.token;
+      reconnectTokens[p.email] = resp.token as string;
     }
 
     // Commit — response IS the promotion-committed message
     try {
-      const result = await this.signaling.request({
+      await this.signaling.request({
         type: 'commit-promotion', roomId: msg.roomId, promotionId: msg.promotionId,
         reconnectTokens,
       });
-      // result.promotionId matches msg.promotionId — switch role now
       this.onLog?.('system', '✅ Now hosting the room');
-      if (this.room) this.room.close();
+      const oldRoom = this.room; // old peer connection — keep alive until new room ready
       this.room = this.nextRoom;
       this.nextRoom = null;
       this._roomId = msg.roomId;
       this._connectionState = 'connected';
+      this._lastRoomStateVersion = 0; // reset for new host's version counter
       this.setupRoomHandlers(this.room!, true);
+      // Close old peer connection AFTER new host room is ready
+      oldRoom?.close();
       this.onRoleChanged?.(true, msg.hostEmail || this.getEmail?.() || '');
       this.promotionInProgress = false;
     } catch (err: any) {
@@ -334,11 +382,31 @@ export class SessionController {
     }
   }
 
+  /** Broadcast canonical participant list to all peers. Host-only — peers receive via onRoomState.
+   *  Includes a monotonic version so receivers can ignore duplicates/out-of-order messages. */
+  broadcastRoomState(peers: Participant[]): void {
+    if (!this.room) return;
+    this._roomStateVersion++;
+    this.room.send(encodeChat(`[ROOM]${JSON.stringify({ peers, v: this._roomStateVersion })}`));
+  }
+
   sendFeature(data: Uint8Array) { this.room?.send(encodeYjs(data)); }
   sendFeatureDataToPeer(peerId: string, data: Uint8Array) { this.room?.sendToPeer(peerId, encodeYjs(data)); }
   sendControl(msg: string) { this.room?.send(encodeChat(msg)); }
   sendChatMessage(text: string) {
-    this.room?.send(encodeChat(text));
+    const email = this.getEmail?.() ?? 'unknown';
+    const role = this._isHost ? 'host' : 'peer';
+    this.room?.send(encodeStructuredChat(email, role, text));
   }
-  close() { this.room?.close(); this.signaling.close(); }
+
+  /** Close the room and signaling, reject pending operations, reset state. */
+  close(): void {
+    this._connectionState = 'closed';
+    this.promotionInProgress = false;
+    this.room?.close();
+    this.room = null;
+    this.nextRoom?.close();
+    this.nextRoom = null;
+    this.signaling.close();
+  }
 }

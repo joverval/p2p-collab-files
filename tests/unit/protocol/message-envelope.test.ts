@@ -176,11 +176,11 @@ describe('Message Envelope', () => {
 
   // Bonus: encodeStructuredChat round-trip
   it('encodeStructuredChat round-trips via decodeMessage', () => {
-    const encoded = encodeStructuredChat('Alice', 'Hi there!');
+    const encoded = encodeStructuredChat('Alice', 'host', 'Hi there!');
     const decoded = decodeMessage(encoded);
     expect(decoded.type).toBe('chat');
     const text = (decoded as { type: 'chat'; text: string }).text;
     const parsed = JSON.parse(text);
-    expect(parsed).toEqual({ type: 'chat', sender: 'Alice', text: 'Hi there!' });
+    expect(parsed).toEqual({ type: 'chat', sender: 'Alice', senderRole: 'host', text: 'Hi there!' });
   });
 });

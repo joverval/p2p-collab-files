@@ -282,7 +282,10 @@ describe('SignalingClient', () => {
 
       client.close();
 
-      // After close, any request that was pending should be cleared
+      // All pending requests are rejected immediately
+      await expect(req1).rejects.toThrow('Signaling closed');
+      await expect(req2).rejects.toThrow('Signaling closed');
+
       // New requests should fail with 'Not connected'
       await expect(client.request({ type: 'task3' })).rejects.toThrow('Not connected');
     });

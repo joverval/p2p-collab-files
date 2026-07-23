@@ -6,6 +6,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "paths": {
       "@joverval/p2p-collab": ["../p2p-collab/dist/index"]
     }

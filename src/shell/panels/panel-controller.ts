@@ -12,10 +12,22 @@ export class PanelController {
     private chat: ChatController,
     private participants: ParticipantsController,
     private isHostFn: () => boolean,
-    private isConnectedFn: () => boolean = () => false,
+    _isConnectedFn: () => boolean = () => false,
   ) {}
 
   setSendChat(fn: (text: string) => void) { this._sendChatFn = fn; }
+
+  get currentPanel(): string { return this._currentPanel; }
+
+  /** Re-render the currently open panel (called on role change). */
+  refresh() {
+    if (!this._currentPanel) return;
+    const body = $('panel-body') as HTMLElement;
+    body.innerHTML = '';
+    if (this._currentPanel === 'users') this.participants.render(this.isHostFn(), body);
+    else if (this._currentPanel === 'info') this.renderInfo(body);
+    else if (this._currentPanel === 'chat') this.renderChat(body);
+  }
 
   open(name: string) {
     if (this._currentPanel === name) { this.close(); return; }
@@ -44,19 +56,26 @@ export class PanelController {
   private renderChat(body: HTMLElement) {
     body.innerHTML = `<div id="chat-log"></div>
 <div class="chat-input-row"><input id="chat-input" placeholder="Type..."><button id="chat-send-btn">Send</button></div>`;
-    const logEl = body.querySelector('#chat-log')!;
+    const logEl = body.querySelector('#chat-log')! as HTMLElement;
     const input = body.querySelector('#chat-input') as HTMLInputElement;
     const sendBtn = body.querySelector('#chat-send-btn') as HTMLButtonElement;
+
+    // Inject full message history via safe textContent-only rendering
+    this.chat.renderInto(logEl);
+
+    // Single safe send path: calls _sendChatFn which was set by app.ts via setSendChat
     const doSend = () => {
       const text = input.value.trim();
       if (!text || !this._sendChatFn) return;
       this._sendChatFn(text);
+      input.value = '';
     };
     sendBtn.addEventListener('click', doSend);
     input.addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
   }
 
   private renderInfo(body: HTMLElement) {
+    // Info content is static, not user-generated — innerHTML is acceptable here
     body.innerHTML = `<div class="info-section">
 <h3>🖥️ Host</h3><p>1. Enter email & click <b>Create Room</b></p><p>2. Click <b>📋 Copy invite</b> and share</p><p>3. Approve or reject peers</p><p>4. If manual: paste answer URL</p>
 <hr><h3>👤 Peer</h3><p>1. Open invite link from host</p><p>2. Enter email & click <b>Join Room</b></p><p>3. Wait for host approval</p><p>4. If manual: click copy & send answer</p>
