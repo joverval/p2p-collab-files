@@ -28,10 +28,6 @@ jobs:
           npm ci
           npx tsup --no-dts
 
-      - name: Restore library type declarations
-        working-directory: lib
-        run: git checkout dist/index.d.ts
-
       - name: Install app
         working-directory: app
         run: npm ci
