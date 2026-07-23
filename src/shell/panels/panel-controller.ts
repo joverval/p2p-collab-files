@@ -6,12 +6,16 @@ import type { ParticipantsController } from '../participants/participants-contro
 
 export class PanelController {
   private _currentPanel = '';
+  private _sendChatFn: ((text: string) => void) | null = null;
 
   constructor(
     private chat: ChatController,
     private participants: ParticipantsController,
     private isHostFn: () => boolean,
+    private isConnectedFn: () => boolean = () => false,
   ) {}
+
+  setSendChat(fn: (text: string) => void) { this._sendChatFn = fn; }
 
   open(name: string) {
     if (this._currentPanel === name) { this.close(); return; }
@@ -38,16 +42,20 @@ export class PanelController {
   }
 
   private renderChat(body: HTMLElement) {
+    const connected = this.isConnectedFn();
     body.innerHTML = `<div id="chat-log"></div>
-<div class="chat-input-row"><input id="chat-input" placeholder="Type..." disabled><button id="chat-send-btn" disabled>Send</button></div>`;
+<div class="chat-input-row"><input id="chat-input" placeholder="Type..." ${connected ? '' : 'disabled'}><button id="chat-send-btn" ${connected ? '' : 'disabled'}>Send</button></div>`;
     const logEl = body.querySelector('#chat-log')!;
-    // chat log HTML is managed by ChatController
     const input = body.querySelector('#chat-input') as HTMLInputElement;
     const sendBtn = body.querySelector('#chat-send-btn') as HTMLButtonElement;
-    sendBtn.addEventListener('click', () => {
-      this.chat.sendChat(input.value.trim(), '', () => {}); // wired externally
-    });
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') sendBtn.click(); });
+    if (!connected) { input.disabled = true; sendBtn.disabled = true; }
+    const doSend = () => {
+      const text = input.value.trim();
+      if (!text || !this._sendChatFn) return;
+      this._sendChatFn(text);
+    };
+    sendBtn.addEventListener('click', doSend);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doSend(); });
   }
 
   private renderInfo(body: HTMLElement) {

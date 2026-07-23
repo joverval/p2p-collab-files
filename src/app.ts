@@ -1,4 +1,4 @@
-// app.ts — composition root
+// app.ts — composition root v1.2
 // Wires shell controllers + MarkdownFeature
 
 import './style.css';
@@ -10,34 +10,65 @@ import { SessionController } from './shell/session-controller';
 import { MarkdownFeature } from './features/markdown/markdown-feature';
 import { encodeChat } from './shell/protocol/message-envelope';
 
+declare const __BUILD_TIME__: string;
+console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
+
 export function createApplication() {
   const chat = new ChatController();
   const participants = new ParticipantsController();
   let isHost = false;
-  const panel = new PanelController(chat, participants, () => isHost);
   const session = new SessionController();
+  const panel = new PanelController(chat, participants, () => isHost, () => session.isConnected);
   const feature = new MarkdownFeature();
 
   let email = '';
+  let editorReady = false;
+
+  // ── Chat send wiring ──
+  panel.setSendChat((text: string) => {
+    chat.addLog('sent', isHost ? `[Host]: ${text}` : text);
+    session.sendChatMessage(text);
+  });
 
   function updateTopBar() {
     $('topbar').style.display = 'flex';
     ($('user-count') as HTMLElement).textContent = String(participants.userCount());
   }
 
+  function ensureEditorVisible() {
+    if (editorReady) return;
+    editorReady = true;
+    $('editor-section').style.display = 'flex';
+    if (!isHost) {
+      ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
+      ($('sync-btn') as HTMLButtonElement).style.display = '';
+    }
+    chat.addLog('system', '📝 Editor ready');
+
+    feature.start({
+      isHost: () => isHost,
+      isConnected: () => session.isConnected,
+      sendFeatureData: (data) => session.sendFeature(data),
+      sendControlMessage: (msg) => session.sendControl(msg),
+      reportStatus: (msg) => chat.addLog('system', msg),
+    });
+  }
+
   // ── Wire session → controllers ──
   session.onLog = (type, text) => chat.addLog(type, text);
 
   session.onPendingRequest = (pEmail, token, offerId, answerB64) => {
+    participants.pendingPeerEmail = pEmail;
     ($('toast-msg') as HTMLElement).textContent = `🔔 ${pEmail}`;
     $('toast').style.display = 'flex';
     ($('toast-approve') as HTMLButtonElement).onclick = () => {
       if (offerId && answerB64) {
-        participants.pendingPeerEmail = pEmail;
+        session.pendingPeerEmail = pEmail;
         session.acceptAnswer(`#sdp=${answerB64}`, offerId);
       }
       session.approvePeer(token);
       $('toast').style.display = 'none';
+      chat.addLog('system', `✅ Approved ${pEmail}`);
     };
     ($('toast-reject') as HTMLButtonElement).onclick = () => {
       session.rejectPeer(token);
@@ -55,7 +86,7 @@ export function createApplication() {
   };
   session.onConnected = (route) => {
     chat.addLog('system', `📡 Connected — ${route}`);
-    feature.onConnected();
+    ensureEditorVisible();
   };
   session.onRoleChanged = (host, hostEmail) => {
     isHost = host;
@@ -63,10 +94,10 @@ export function createApplication() {
     updateTopBar();
   };
   session.onFeatureData = (data, peerId) => feature.handleFeatureData(data, peerId);
-  session.onControlMessage = (text) => feature.handleControlMessage?.(text);
+  session.onControlMessage = (text) => feature.handleControlMessage(text);
   session.onChatMessage = (sender, text) => chat.addLog('received', `${sender}: ${text}`);
   session.onRoomState = (peers) => { participants.allUsers = peers; updateTopBar(); };
-  session.setConnected = (v) => { /* data channel state */ };
+  session.setConnected = (v) => { /* data channel state tracked internally */ };
   session.getEmail = () => email;
 
   // ── Promote button ──
@@ -75,32 +106,19 @@ export function createApplication() {
     await session.promotePeer(targetEmail, participants.allUsers, rtcConfig, () => feature.doc, () => feature.text);
   };
 
-  // ── Feature context ──
-  feature.start({
-    isHost: () => isHost,
-    isConnected: () => session.roomRef !== null,
-    sendFeatureData: (data) => session.sendFeature(data),
-    sendControlMessage: (msg) => session.sendControl(msg),
-    reportStatus: (msg) => chat.addLog('system', msg),
-  });
-
   // ── UI bindings ──
+  // Open file
   ($('open-file-btn') as HTMLButtonElement).addEventListener('click', () => {
     if (feature.doc && feature.text && feature.editor) feature.file?.openFile(feature.doc, feature.text, feature.editor);
   });
+  // Save file
   ($('save-file-btn') as HTMLButtonElement).addEventListener('click', () => {
     if (feature.text) feature.file?.saveFile(feature.text.toString());
   });
 
+  // Panel open/close
   $('panel-close').addEventListener('click', () => panel.close());
   document.querySelectorAll('.panel-btn').forEach(btn => btn.addEventListener('click', () => panel.open((btn as HTMLElement).dataset.panel!)));
-
-  // User dropdown
-  ($('user-counter') as HTMLElement)?.addEventListener('click', (e) => {
-    e.stopPropagation();
-    ($('user-dropdown') as HTMLElement)?.classList.toggle('show');
-  });
-  document.addEventListener('click', () => ($('user-dropdown') as HTMLElement)?.classList.remove('show'));
 
   // File dropdown
   ($('file-menu-btn') as HTMLElement)?.addEventListener('click', (e) => {
@@ -111,6 +129,14 @@ export function createApplication() {
 
   // Sync
   ($('sync-btn') as HTMLButtonElement)?.addEventListener('click', () => session.sendControl('[SYNC]'));
+
+  // Filename input → broadcast
+  $('topbar-filename').addEventListener('input', () => {
+    const name = ($('topbar-filename') as HTMLElement).textContent || 'Untitled.md';
+    if (isHost && session.isConnected) {
+      session.sendControl(`[FILENAME]${name}`);
+    }
+  });
 
   // Mobile toggle
   ($('show-editor-btn') as HTMLButtonElement)?.addEventListener('click', () => {
@@ -142,8 +168,8 @@ export function createApplication() {
     };
     ($('open-file-btn') as HTMLButtonElement).disabled = false;
     ($('save-file-btn') as HTMLButtonElement).disabled = false;
-    $('editor-section').style.display = 'flex';
-    chat.addLog('system', '📝 Editor ready');
+
+    ensureEditorVisible();
 
     if (!useRelay) {
       ($('manual-answer-input') as HTMLInputElement).style.display = '';
@@ -165,8 +191,8 @@ export function createApplication() {
       ($('email-input') as HTMLInputElement).disabled = true;
       participants.allUsers = [{ email, isHost: false }];
       await session.peerAutoJoin(parsed, email);
-      ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
       ($('save-file-btn') as HTMLButtonElement).disabled = false;
+      ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
     });
   }
 }

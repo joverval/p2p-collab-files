@@ -60,7 +60,16 @@ export class MarkdownFeature implements CollaborationFeature {
     if (!this.ydoc || !this.ytext) return;
     // Decode outer envelope: data = [0x01, seqHi, seqLo, ...update]
     const update = data.slice(3);
+    const savedCursor = this.editorView ? this.editorView.state.selection.main.head : 0;
     Y.applyUpdate(this.ydoc, update, NETWORK_ORIGIN);
+    // Sync CodeMirror with Yjs text (belt-and-suspenders with yCollab)
+    const newText = this.ytext.toString();
+    if (this.editorView && this.editorView.state.doc.toString() !== newText) {
+      this.editorView.dispatch({ changes: { from: 0, to: this.editorView.state.doc.length, insert: newText } });
+    }
+    if (this.editorView && savedCursor <= this.editorView.state.doc.length) {
+      this.editorView.dispatch({ selection: { anchor: savedCursor } });
+    }
     this.preview?.schedule();
   }
 

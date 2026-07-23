@@ -43,6 +43,7 @@ export class SessionController {
   get shareUrl(): string { return this._shareUrl; }
   get currentOfferId(): string { return this._currentOfferId; }
   get roomRef(): Room | null { return this.room; }
+  get isConnected(): boolean { return this.room !== null; }
 
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
@@ -268,5 +269,9 @@ export class SessionController {
 
   sendFeature(data: Uint8Array) { this.room?.send(data); }
   sendControl(msg: string) { this.room?.send(encodeChat(msg)); }
+  sendChatMessage(text: string) {
+    const prefix = this.getEmail?.() || 'anonymous';
+    this.room?.send(encodeChat(`${prefix}: ${text}`));
+  }
   close() { this.room?.close(); this.signaling.close(); }
 }
