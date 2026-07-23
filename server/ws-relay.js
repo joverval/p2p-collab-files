@@ -10,7 +10,7 @@ import { WebSocketServer } from 'ws';
 const PORT = Number(process.env.PORT || 8083);
 const TOKEN_TTL = 5 * 60 * 1000;
 const ALLOWED_ORIGINS = (process.env.APP_ORIGINS || 'https://joverval.cl,http://localhost:8082').split(',');
-const TURN_ENABLED = process.env.TURN_ENABLED === '1';
+const TURN_ENABLED = process.env.TURN_ENABLED === '1' || process.env.TURN_ENABLED === 'true' || true;
 let TURN_HOST = process.env.TURN_HOST || '';
 const TURN_PORT = Number(process.env.TURN_PORT || 3478);
 const TURN_USER = process.env.TURN_USER || 'turnuser';
@@ -20,7 +20,7 @@ const TURN_PASS = process.env.TURN_PASS || 'turnpass-p2p-collab';
 if (TURN_ENABLED) {
   async function refreshTurnIp() {
     try {
-      const resp = await fetch('https://ifconfig.me');
+      const resp = await fetch('https://ifconfig.me/ip');
       const ip = (await resp.text()).trim();
       if (ip && ip !== TURN_HOST) {
         console.log(`TURN IP changed: ${TURN_HOST || 'none'} → ${ip}`);
