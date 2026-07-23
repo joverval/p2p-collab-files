@@ -42,13 +42,11 @@ export class PanelController {
   }
 
   private renderChat(body: HTMLElement) {
-    const connected = this.isConnectedFn();
     body.innerHTML = `<div id="chat-log"></div>
-<div class="chat-input-row"><input id="chat-input" placeholder="Type..." ${connected ? '' : 'disabled'}><button id="chat-send-btn" ${connected ? '' : 'disabled'}>Send</button></div>`;
+<div class="chat-input-row"><input id="chat-input" placeholder="Type..."><button id="chat-send-btn">Send</button></div>`;
     const logEl = body.querySelector('#chat-log')!;
     const input = body.querySelector('#chat-input') as HTMLInputElement;
     const sendBtn = body.querySelector('#chat-send-btn') as HTMLButtonElement;
-    if (!connected) { input.disabled = true; sendBtn.disabled = true; }
     const doSend = () => {
       const text = input.value.trim();
       if (!text || !this._sendChatFn) return;
