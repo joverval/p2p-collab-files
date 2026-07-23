@@ -14,11 +14,16 @@ const GRACE_PERIOD = 10_000;       // 10s for host reconnect
 const CANDIDATE_TIMEOUT = 30_000;  // 30s for candidate to respond
 const HEARTBEAT_INTERVAL = 30_000;
 const PONG_TIMEOUT = 60_000;
-const TURN_ENABLED = process.env.TURN_ENABLED === '1' || process.env.TURN_ENABLED === 'true' || true;
+let TURN_ENABLED = process.env.TURN_ENABLED === '1' || process.env.TURN_ENABLED === 'true';
 let TURN_HOST = process.env.TURN_HOST || '';
 const TURN_PORT = Number(process.env.TURN_PORT || 3478);
-const TURN_USER = process.env.TURN_USER || 'turnuser';
-const TURN_PASS = process.env.TURN_PASS || 'turnpass-p2p-collab';
+const TURN_USER = process.env.TURN_USER || '';
+const TURN_PASS = process.env.TURN_PASS || '';
+
+if (TURN_ENABLED && (!TURN_USER || !TURN_PASS)) {
+  console.error('TURN_ENABLED=1 but TURN_USER/TURN_PASS not set. TURN disabled.');
+  TURN_ENABLED = false;
+}
 
 // Auto-detect public IP every 5 minutes (for dynamic IP)
 if (TURN_ENABLED) {
