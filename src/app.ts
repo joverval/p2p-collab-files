@@ -11,8 +11,8 @@ import { MarkdownFeature } from './features/markdown/markdown-feature';
 import { exposeTestAPI } from './test-api';
 import * as Y from 'yjs';
 
-declare const __BUILD_TIME__: string;
-console.log('p2p-collab-files — built', __BUILD_TIME__ || 'dev');
+declare const __COMMIT_SHA__: string;
+console.log('p2p-collab-files — built', __COMMIT_SHA__);
 
 export function createApplication() {
   const chat = new ChatController();

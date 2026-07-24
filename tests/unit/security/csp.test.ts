@@ -95,6 +95,11 @@ describe('Content Security Policy', () => {
     expect(connectSrc).toContain('https://relay.joverval.cl');
   });
 
+  it('connect-src allows track.joverval.cl for GoatCounter analytics', () => {
+    const connectSrc = directives.get('connect-src') || '';
+    expect(connectSrc).toContain('https://track.joverval.cl');
+  });
+
   // ── style-src ──
   it("style-src includes 'self'", () => {
     const styleSrc = directives.get('style-src') || '';
