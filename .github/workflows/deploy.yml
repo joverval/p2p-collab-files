@@ -1,5 +1,5 @@
 # .github/workflows/deploy.yml
-# Deploy to GitHub Pages. Triggered only when CI passes on main.
+# Deploy to GitHub Pages. Triggered only when CI passes on master.
 # Gate: workflow_run waits for CI completion; conclusion=='success' blocks deploy on any failure.
 # Vite config already sets base:'./' for GitHub Pages compatibility.
 
@@ -9,7 +9,7 @@ on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [main]
+    branches: [master]
 
 permissions:
   contents: read
