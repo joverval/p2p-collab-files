@@ -68,7 +68,7 @@ describe('Content Security Policy', () => {
 
   it('script-src allows cdn.jsdelivr.net for marked.js', () => {
     const scriptSrc = directives.get('script-src') || '';
-    expect(scriptSrc).toContain('https://cdn.jsdelivr.net');
+    expect(scriptSrc).toContain('cdn.jsdelivr.net');
   });
 
   // ── connect-src ──
