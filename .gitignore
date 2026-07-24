@@ -6,3 +6,4 @@ infra/coturn/.env
 infra/coturn/generated-turnserver.conf
 infra/coturn/certs/*.pem
 playwright-report/\ntest-results/
+.hermes
