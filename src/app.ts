@@ -49,14 +49,8 @@ export function createApplication() {
     ($('user-count') as HTMLElement).textContent = String(participants.userCount());
   }
 
-  function updateRoleAwareUI() {
-    updateTopBar();
-    panel.refresh();
-  }
-
-  function applyRoleState(host: boolean, hostEmail: string) {
+  function applyRoleState(host: boolean, _hostEmail: string) {
     isHost = host;
-    participants.allUsers = participants.allUsers.map(u => ({ ...u, isHost: u.email === hostEmail }));
 
     // Host-only controls
     ($('open-file-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
@@ -77,7 +71,6 @@ export function createApplication() {
     // Role label in top bar
     setTextContent('topbar-role', host ? '👑 Host' : '👤 Peer');
 
-    updateTopBar();
     panel.refresh();
     ensureEditorVisible();
   }
@@ -104,6 +97,13 @@ export function createApplication() {
   }
 
   // ── Wire session → controllers ──
+  // ONE authoritative path: SessionController → onRoomState → ParticipantsController
+  session.onRoomState = (snapshot) => {
+    participants.replaceSnapshot(snapshot);
+    updateTopBar();
+    panel.refreshIfOpen('users');
+  };
+
   session.onLog = (type, text) => chat.addLog(type as 'host' | 'peer' | 'system', text);
 
   session.onPendingRequest = (req) => {
@@ -121,22 +121,11 @@ export function createApplication() {
     };
   };
 
-  session.onPeerJoin = (peerId, peerEmail) => {
-    participants.allUsers = [...participants.allUsers, {
-      email: peerEmail,
-      isHost: false,
-      participantId: peerId,
-      connected: true,
-      joinOrder: participants.allUsers.length + 1,
-    }];
+  session.onPeerJoin = (peerId, _peerEmail) => {
     feature.onPeerJoined?.(peerId);
-    updateTopBar();
-    session.broadcastRoomState(participants.allUsers);
   };
-  session.onPeerLeave = (peerEmail) => {
-    participants.allUsers = participants.allUsers.filter(u => u.email !== peerEmail);
-    updateTopBar();
-    session.broadcastRoomState(participants.allUsers);
+  session.onPeerLeave = (_peerEmail) => {
+    // all state updates flow through onRoomState
   };
   session.onConnected = (route) => {
     chat.addLog('system', `📡 Connected — ${route}`);
@@ -146,7 +135,6 @@ export function createApplication() {
   };
   session.onRoleChanged = (host, hostEmail) => {
     applyRoleState(host, hostEmail);
-    session.broadcastRoomState(participants.allUsers);
   };
   session.onFeatureData = (data, peerId) => feature.handleFeatureData(data, peerId);
   session.onControlMessage = (text) => feature.handleControlMessage(text);
@@ -154,7 +142,6 @@ export function createApplication() {
     const role: 'host' | 'peer' | 'system' = (senderRole === 'host' || senderRole === 'peer' || senderRole === 'system') ? senderRole : 'peer';
     chat.addLog(role, text, sender);
   };
-  session.onRoomState = (peers) => { participants.replaceSnapshot(peers); updateRoleAwareUI(); };
   
   session.getEmail = () => email;
 
@@ -166,7 +153,7 @@ export function createApplication() {
   // ── UI bindings ──
   // Open file
   ($('open-file-btn') as HTMLButtonElement).addEventListener('click', () => {
-    if (feature.doc && feature.text && feature.editor) feature.file?.openFile(feature.doc, feature.text, feature.editor);
+    if (feature.doc && feature.text) feature.file?.openFile(feature.doc, feature.text);
   });
   // Save file
   ($('save-file-btn') as HTMLButtonElement).addEventListener('click', () => {
@@ -214,8 +201,6 @@ export function createApplication() {
     email = ($('email-input') as HTMLInputElement).value.trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { chat.addLog('system', 'ERROR: Please enter a valid email'); return; }
     isHost = true;
-    participants.allUsers = [{ email, isHost: true, participantId: 'host', connected: true, joinOrder: 1 }];
-    updateTopBar();
     ($('email-input') as HTMLInputElement).disabled = true;
 
     const useRelay = await session.createRoom(email);
@@ -246,7 +231,6 @@ export function createApplication() {
       email = ($('email-input') as HTMLInputElement).value.trim();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { chat.addLog('system', 'ERROR: Please enter a valid email'); return; }
       ($('email-input') as HTMLInputElement).disabled = true;
-      participants.allUsers = [{ email, isHost: false, participantId: 'self', connected: false, joinOrder: 0 }];
       await session.peerAutoJoin(parsed, email);
       ($('save-file-btn') as HTMLButtonElement).disabled = false;
       ($('open-file-btn') as HTMLButtonElement).style.display = 'none';

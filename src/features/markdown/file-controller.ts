@@ -2,7 +2,6 @@
 
 import { $, el } from '../../shared/dom';
 import type * as Y from 'yjs';
-import type { EditorView } from 'codemirror';
 import { FILE_OPEN_ORIGIN } from './document-sync';
 
 export class FileController {
@@ -21,7 +20,7 @@ export class FileController {
     private onFilenameBroadcast: (name: string) => void,
   ) {}
 
-  async openFile(ydoc: Y.Doc, ytext: Y.Text, _editorView: EditorView | null) {
+  async openFile(ydoc: Y.Doc, ytext: Y.Text) {
     if (!this.isHost() || !ydoc) return;
     try {
       let name: string, c: string;
