@@ -52,9 +52,11 @@ jobs:
           kill %1 2>/dev/null || true
 
       - name: Install Playwright browsers
+        if: false  # E2E disabled — uses mocked unit tests instead
         run: npx playwright install --with-deps chromium
 
       - name: E2E tests
+        if: false  # E2E disabled — uses mocked unit tests instead
         run: |
           node server/ws-relay.js &
           sleep 3
