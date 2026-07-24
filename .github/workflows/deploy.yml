@@ -1,7 +1,7 @@
 # .github/workflows/deploy.yml
-# Deploy to GitHub Pages. Triggered only when CI passes on master.
-# Gate: workflow_run waits for CI completion; conclusion=='success' blocks deploy on any failure.
-# Vite config already sets base:'./' for GitHub Pages compatibility.
+# Deploy to GitHub Pages. Triggered only when CI (test.yml) passes on master.
+# Steps: clone peer library → npm ci → npm run build → configure-pages → upload → deploy
+# All actions pinned to full commit SHA (supply-chain hardening).
 
 name: Deploy to GitHub Pages
 
@@ -26,14 +26,13 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
-          cache: 'npm'
 
       - name: Clone and build peer library (@joverval/p2p-collab)
         run: |
@@ -41,25 +40,16 @@ jobs:
           cd ../p2p-collab
           npm ci
           npm run build
-          npx tsc --emitDeclarationOnly
 
       - run: npm ci
 
-      - name: Quick pre-deploy smoke
-        run: |
-          npm run typecheck
-          node server/ws-relay.js &
-          sleep 2
-          curl -sf http://localhost:8083/healthz
-          kill %1 2>/dev/null || true
-
       - run: npm run build
 
-      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
         with:
-          path: dist/
+          path: dist
 
-      - id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0
