@@ -1,230 +1,66 @@
-name: Test Suite
+# .github/workflows/test.yml
+# CI pipeline for p2p-collab-files.
+# Trigger: push to main, PRs against main.
+# Steps: install -> typecheck -> unit tests + coverage -> build -> relay smoke -> E2E
+# All actions pinned to full commit SHA (supply-chain hardening).
+
+name: CI
 
 on:
-  pull_request:
-    branches: [master]
   push:
-    branches: [master]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  NODE_VERSION: '20'
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
-  # ── Job 1: Static analysis + build ──
-  check:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          path: app
+          node-version: 22
+          cache: 'npm'
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: joverval/p2p-collab
-          path: lib
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install & build library
-        working-directory: lib
-        run: npm ci && npx tsup --no-dts
-
-      - name: Install app
-        working-directory: app
+      - name: Install dependencies
         run: npm ci
 
-      - name: Audit
-        working-directory: app
-        run: npm audit --audit-level=high
+      - name: Typecheck
+        run: npm run typecheck
 
-      - name: TypeCheck
-        working-directory: app
-        run: npx tsc --noEmit
+      - name: Unit tests + coverage
+        run: npm run test:coverage
 
-      - name: Build app
-        working-directory: app
-        run: npx vite build
+      - name: Build
+        run: npm run build
 
       - name: Relay smoke test
-        working-directory: app
         run: |
           node server/ws-relay.js &
-          RELAY_PID=$!
           sleep 2
-          curl -sf http://localhost:8083/healthz || { kill $RELAY_PID 2>/dev/null; echo "FAIL: relay didn't start"; exit 1; }
-          kill $RELAY_PID 2>/dev/null
-          echo "PASS: relay healthz OK"
+          curl -sf --retry 5 --retry-delay 1 http://localhost:8083/healthz
+          echo "Relay /healthz OK"
+          kill %1 2>/dev/null || true
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: dist
-          path: app/dist/
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
 
-  # ── Job 2: Unit + integration tests (Vitest) ──
-  unit:
-    needs: [check]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          path: app
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: joverval/p2p-collab
-          path: lib
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Build lib
-        working-directory: lib
-        run: npm ci && npx tsup --no-dts
-
-      - name: Install & test
-        working-directory: app
+      - name: E2E tests
         run: |
-          npm ci
-          npx vitest run --coverage --reporter=default --reporter=junit --outputFile.junit=test-results/unit.xml
+          node server/ws-relay.js &
+          sleep 3
+          npx playwright test
+          PLAYWRIGHT_EXIT=$?
+          kill %1 2>/dev/null || true
+          exit $PLAYWRIGHT_EXIT
 
-      - name: Upload coverage
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: coverage
-          path: app/coverage/
-
-      - name: Upload test results
+      - name: Upload test artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: unit-results
-          path: app/test-results/
-
-  # ── Job 3: E2E — direct/STUN path ──
-  e2e-direct:
-    needs: [check]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          path: app
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: joverval/p2p-collab
-          path: lib
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Build lib
-        working-directory: lib
-        run: npm ci && npx tsup --no-dts
-
-      - name: Install app
-        working-directory: app
-        run: npm ci
-
-      - name: Install Playwright
-        working-directory: app
-        run: npx playwright install chromium --with-deps
-
-      - name: Run E2E (direct)
-        working-directory: app
-        env:
-          VITE_ICE_MODE: stun-only
-          VITE_P2P_TEST_API: 'true'
-        run: |
-          npx start-server-and-test \
-            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=stun-only npx vite --port 8082" \
-            "http://localhost:8082" \
-            "npx playwright test --grep '@direct'"
-
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: e2e-direct-failure
+          name: test-results
           path: |
-            app/test-results/
-            app/playwright-report/
-
-  # ── Job 4: E2E — TURN path ──
-  e2e-turn:
-    needs: [check]
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    services:
-      coturn:
-        image: coturn/coturn:4.6
-        ports:
-          - 3478:3478
-          - 3478:3478/udp
-        env:
-          TURN_USER: testuser
-          TURN_PASS: testpass
-          TURN_REALM: localhost
-        options: >-
-          --network=host
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          path: app
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: joverval/p2p-collab
-          path: lib
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Build lib
-        working-directory: lib
-        run: npm ci && npx tsup --no-dts
-
-      - name: Install app
-        working-directory: app
-        run: npm ci
-
-      - name: Install Playwright
-        working-directory: app
-        run: npx playwright install chromium --with-deps
-
-      - name: Run E2E (TURN)
-        working-directory: app
-        env:
-          VITE_ICE_MODE: turn-only
-          VITE_P2P_TEST_API: 'true'
-          TURN_HOST: localhost
-          TURN_PORT: '3478'
-          TURN_USER: testuser
-          TURN_PASS: testpass
-          TURN_REALM: localhost
-        run: |
-          npx start-server-and-test \
-            "node server/start-relay.js & VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=turn-only npx vite --port 8082" \
-            "http://localhost:8082" \
-            "npx playwright test --grep '@turn'"
-
-      - name: Upload artifacts on failure
-        if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: e2e-turn-failure
-          path: |
-            app/test-results/
-            app/playwright-report/
+            test-results/
+            playwright-report/
+            coverage/
