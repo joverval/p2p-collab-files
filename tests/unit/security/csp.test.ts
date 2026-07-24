@@ -71,6 +71,12 @@ describe('Content Security Policy', () => {
     expect(scriptSrc).toContain('cdn.jsdelivr.net');
   });
 
+  // ── GoatCounter analytics ──
+  it('script-src allows track.joverval.cl for GoatCounter analytics', () => {
+    const scriptSrc = directives.get('script-src') || '';
+    expect(scriptSrc).toContain('track.joverval.cl');
+  });
+
   // ── connect-src ──
   it("connect-src includes 'self'", () => {
     const connectSrc = directives.get('connect-src') || '';
@@ -82,6 +88,11 @@ describe('Content Security Policy', () => {
     expect(connectSrc).toContain('wss://relay.joverval.cl');
     // Also allow local WS for development
     expect(connectSrc).toContain('ws://localhost:8083');
+  });
+
+  it('connect-src allows HTTPS fetch to relay for TURN credentials', () => {
+    const connectSrc = directives.get('connect-src') || '';
+    expect(connectSrc).toContain('https://relay.joverval.cl');
   });
 
   // ── style-src ──
