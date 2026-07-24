@@ -23,6 +23,13 @@ jobs:
           node-version: 22
           cache: 'npm'
 
+      - name: Clone and build peer library (@joverval/p2p-collab)
+        run: |
+          git clone https://github.com/joverval/p2p-collab.git ../p2p-collab
+          cd ../p2p-collab
+          npm ci
+          npm run build
+
       - name: Install dependencies
         run: npm ci
 
