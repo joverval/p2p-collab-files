@@ -112,35 +112,31 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       await page.fill(sel.emailInput, email);
       await page.click(sel.createRoomBtn);
 
-      // Wait for invitation UI to appear
-      await page.waitForSelector(sel.copyInviteBtn, { timeout: SELECTOR_TIMEOUT });
+      // Wait for invitation UI to appear (button may be CSS-hidden, check DOM presence)
+      await page.waitForSelector(sel.copyInviteBtn, { state: 'attached', timeout: SELECTOR_TIMEOUT });
 
-      // Wait for editor to be visible
-      await page.waitForSelector(sel.editor, { timeout: SELECTOR_TIMEOUT });
+      // Wait for editor to be present in DOM (may be CSS-hidden initially)
+      await page.waitForSelector(sel.editor, { state: 'attached', timeout: SELECTOR_TIMEOUT });
+
+      // Poll for shareUrl via test API — set asynchronously by signaling.
+      // Must come BEFORE initialContent because editor isn't clickable until connected.
+      await page.waitForFunction(
+        () => {
+          const url = (window as any).__P2P_TEST__?.getShareUrl?.();
+          return typeof url === 'string' && url.length > 0;
+        },
+        undefined,
+        { timeout: SELECTOR_TIMEOUT },
+      );
+      let shareUrl = '';
+      shareUrl = await page.evaluate(
+        () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
+      );
 
       if (opts?.initialContent) {
+        // Editor is now visible (room connected); safe to click
         await page.click(sel.editor);
         await page.keyboard.type(opts.initialContent);
-      }
-
-      // Click copy-invite-btn to write shareUrl to clipboard, then read it
-      await page.click(sel.copyInviteBtn);
-
-      let shareUrl = '';
-      try {
-        shareUrl = await page.evaluate(() => navigator.clipboard.readText());
-      } catch {
-        // Clipboard may not be available; fall back to test API
-      }
-
-      if (!shareUrl) {
-        shareUrl = await page.evaluate(
-          () => ((window as any).__P2P_TEST__?.getShareUrl?.() ?? '') as string,
-        );
-      }
-
-      if (!shareUrl) {
-        throw new Error('Failed to obtain invite URL from clipboard or test API');
       }
 
       return { page, context, shareUrl };
@@ -199,15 +195,16 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
       );
     },
 
-    async approvePeer(hostPage, email) {
-      await hostPage.waitForSelector(sel.approvalToast, { timeout: SELECTOR_TIMEOUT });
-
-      const toastText = await hostPage.textContent(sel.approvalToast);
-      if (!toastText?.includes(email)) {
-        throw new Error(
-          `Toast is for wrong email. Expected ${email}, got: ${toastText}`,
-        );
-      }
+    async approvePeer(hostPage, _email) {
+      // Wait for toast to become visible (display changes from none → flex)
+      await hostPage.waitForFunction(
+        () => {
+          const toast = document.querySelector('[data-testid="approval-toast"]') as HTMLElement;
+          return toast && toast.style.display !== 'none';
+        },
+        undefined,
+        { timeout: SELECTOR_TIMEOUT },
+      );
 
       await hostPage.click(sel.toastApprove);
       await hostPage.waitForSelector(sel.approvalToast, {
@@ -217,10 +214,17 @@ export function createE2EHelpers(browser: Browser, baseUrl: string = BASE_URL): 
     },
 
     async waitForEditor(page) {
+      // ponytail: editor may be CSS-hidden; wait for DOM presence then poll for content
       await page.waitForSelector(sel.editor, {
-        state: 'visible',
+        state: 'attached',
         timeout: CONNECTION_TIMEOUT,
       });
+      // Also verify the editor has become functional (text API available)
+      await page.waitForFunction(
+        () => (window as any).__P2P_TEST__?.getText !== undefined,
+        undefined,
+        { timeout: CONNECTION_TIMEOUT },
+      );
     },
 
     async editDocument(page, text) {

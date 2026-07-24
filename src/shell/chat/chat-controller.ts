@@ -15,6 +15,7 @@ function sanitizeText(text: string): string {
 export class ChatController {
   private _messages: ChatMessage[] = [];
   private _unread = 0;
+  private _seenMessageIds = new Set<string>();
 
   get unread(): number { return this._unread; }
   
@@ -33,11 +34,15 @@ export class ChatController {
     if (text.startsWith('[CHKSUM]') || text.includes('[CHKSUM]')) return;
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
+      senderParticipantId: '',
       senderEmail: senderEmail || 'system',
       senderRole,
       text,
       timestamp: Date.now(),
     };
+    // ponytail: dedup by message ID — seenMessageIds Set
+    if (this._seenMessageIds.has(msg.id)) return;
+    this._seenMessageIds.add(msg.id);
     this._messages.push(msg);
     this._unread++;
     this.updateNotif();
@@ -73,8 +78,9 @@ export class ChatController {
     const t = new Date(msg.timestamp).toLocaleTimeString();
     const div = document.createElement('div');
     div.className = `log-entry ${msg.senderRole}`;
+    div.setAttribute('data-testid', 'chat-entry');
     // textContent is always safe: no injection possible
-    div.textContent = `[${t}] ${msg.text}`;
+    div.textContent = `[${t}] ${msg.senderEmail} (${msg.senderRole}): ${msg.text}`;
     return div;
   }
 }

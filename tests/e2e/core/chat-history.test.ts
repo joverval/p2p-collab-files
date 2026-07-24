@@ -6,13 +6,14 @@
  *   2. Peer joins, host approves
  *   3. Both open chat panel
  *   4. Host sends message "Hello from host"
- *   5. Peer verifies message appears
- *   6. Peer sends message "Hello from peer"
- *   7. Host verifies message appears
- *   8. Both close chat panel, then reopen
- *   9. Both verify all 2 messages still present
+ *   5. Wait for peer to receive the message
+ *   6. Peer verifies message appears
+ *   7. Peer sends message "Hello from peer"
+ *   8. Host verifies message appears
+ *   9. Both close chat panel, then reopen
+ *   10. Both verify all 2 messages still present
  */
-import { test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { createE2EHelpers } from '../helpers/e2e-helpers';
 import { SELECTOR_TIMEOUT } from '../helpers/test-constants';
 
@@ -46,29 +47,45 @@ test('chat history persists across panel open/close', async ({ browser }) => {
   // ── 4. Host sends message ──
   await sendChatMessage(host.page, 'Hello from host');
 
-  // ── 5. Peer verifies message appears ──
-  const peerMessages = await getChatMessages(peer.page);
-  test.expect(peerMessages.some(m => m.includes('Hello from host'))).toBeTruthy();
+  // ── 5. Wait for peer to receive the message (relay propagation) ──
+  await peer.page.waitForFunction(
+    (txt) => {
+      const entries = document.querySelectorAll('#chat-log .log-entry');
+      return Array.from(entries).some(e => e.textContent?.includes(txt as string));
+    },
+    'Hello from host',
+    { timeout: SELECTOR_TIMEOUT },
+  );
 
-  // ── 6. Peer sends message ──
+  // ── 6. Peer verifies message appears ──
+  const peerMessages = await getChatMessages(peer.page);
+  expect(peerMessages.some(m => m.includes('Hello from host'))).toBeTruthy();
+
+  // ── 7. Peer sends message ──
   await sendChatMessage(peer.page, 'Hello from peer');
 
-  // ── 7. Host verifies message appears ──
-  const hostMessages = await getChatMessages(host.page);
-  test.expect(hostMessages.some(m => m.includes('Hello from peer'))).toBeTruthy();
+  // ── 8. Host verifies message appears ──
+  await host.page.waitForFunction(
+    (txt) => {
+      const entries = document.querySelectorAll('#chat-log .log-entry');
+      return Array.from(entries).some(e => e.textContent?.includes(txt as string));
+    },
+    'Hello from peer',
+    { timeout: SELECTOR_TIMEOUT },
+  );
 
-  // ── 8. Both close chat panel, then reopen ──
+  // ── 9. Both close chat panel, then reopen ──
   await closeChatPanel(host.page);
   await closeChatPanel(peer.page);
   await openChatPanel(host.page);
   await openChatPanel(peer.page);
 
-  // ── 9. Both verify all 2 messages still present ──
+  // ── 10. Both verify all 2 messages still present ──
   const hostMessagesAfter = await getChatMessages(host.page);
-  test.expect(hostMessagesAfter.length).toBeGreaterThanOrEqual(2);
+  expect(hostMessagesAfter.length).toBeGreaterThanOrEqual(2);
 
   const peerMessagesAfter = await getChatMessages(peer.page);
-  test.expect(peerMessagesAfter.length).toBeGreaterThanOrEqual(2);
+  expect(peerMessagesAfter.length).toBeGreaterThanOrEqual(2);
 
   // ── Cleanup ──
   await cleanup();

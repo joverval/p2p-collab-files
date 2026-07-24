@@ -87,9 +87,9 @@ describe('Security Sanitization', () => {
       expect(entry).toBeDefined();
       // ChatController truncates to CHAT_MAX_LENGTH (1000 chars).
       // The entry format is `[HH:MM:SS] text`, so textContent length
-      // is timestamp prefix (~13-14 chars) + 1000 chars of payload.
+      // is timestamp + email + role prefix + 1000 chars of payload.
       expect(entry.textContent!.length).toBeGreaterThan(CHAT_MAX_LENGTH);
-      expect(entry.textContent!.length).toBeLessThan(CHAT_MAX_LENGTH + 30);
+      expect(entry.textContent!.length).toBeLessThan(CHAT_MAX_LENGTH + 100);
       // All characters in the payload portion are 'A' (no HTML tags)
       expect(entry.innerHTML).not.toContain('<');
     });

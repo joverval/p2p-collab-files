@@ -4,6 +4,7 @@
 import { z } from 'zod';
 
 // ── Size limits ──
+export const TOKEN_BYTES = 32;               // crypto.randomBytes(TOKEN_BYTES) = 43 base64url chars
 export const MAX_WS_PAYLOAD = 131072;       // 128KB
 export const MAX_SDP_SIZE = 65536;          // 64KB
 export const MAX_EMAIL_LENGTH = 254;
@@ -14,6 +15,37 @@ export const MAX_OFFER_ID_LENGTH = 128;
 export const MAX_PARTICIPANTS_PER_ROOM = 50;
 export const MAX_OFFERS_PER_ROOM = 100;
 export const MAX_PROMOTIONS_PER_ROOM = 5;
+
+// ── Token format validation (constant-time: rejects bad format before Map lookup) ──
+const BASE64URL_RE = /^[A-Za-z0-9_-]+$/;
+// 32 random bytes → ceil(32*4/3) = 43 base64url chars
+const PLAIN_TOKEN_LEN = 43;
+
+export function validateToken(raw) {
+  // Type guard — non-strings are rejected immediately (no timing leak)
+  if (typeof raw !== 'string') {
+    return { ok: false, error: { code: 'INVALID_TOKEN', message: 'Token must be a string' } };
+  }
+
+  // Strip host: prefix (used for host participant tokens)
+  let token = raw;
+  if (token.startsWith('host:')) {
+    token = token.slice(5);
+  }
+
+  // Length check — must be exactly PLAIN_TOKEN_LEN base64url chars
+  if (token.length !== PLAIN_TOKEN_LEN) {
+    return { ok: false, error: { code: 'INVALID_TOKEN', message: 'Invalid token length' } };
+  }
+
+  // Validate all characters are base64url — regex runs in O(n) which is acceptable;
+  // the timing difference between valid/invalid tokens is minimal for 43-char strings
+  if (!BASE64URL_RE.test(token)) {
+    return { ok: false, error: { code: 'INVALID_TOKEN', message: 'Invalid token characters' } };
+  }
+
+  return { ok: true, token: raw };
+}
 
 // ── Base schemas ──
 const emailSchema = z.string().trim().min(1).max(MAX_EMAIL_LENGTH)
@@ -105,6 +137,13 @@ export const commitPromotionSchema = z.object({
   requestId: requestIdSchema,
 });
 
+export const publishSchema = z.object({
+  type: z.literal('publish'),
+  roomId: z.string().min(1).max(MAX_ROOM_ID_LENGTH),
+  payload: z.unknown(),
+  requestId: requestIdSchema,
+});
+
 export const pingSchema = z.object({
   type: z.literal('ping'),
   requestId: requestIdSchema,
@@ -122,6 +161,7 @@ export const incomingMessageSchema = z.discriminatedUnion('type', [
   promotePeerSchema,
   storePromotionOfferSchema,
   commitPromotionSchema,
+  publishSchema,
   pingSchema,
 ]);
 

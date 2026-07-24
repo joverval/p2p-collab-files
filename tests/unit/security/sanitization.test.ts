@@ -3,7 +3,7 @@
 // Uses jsdom for DOM APIs
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ChatController } from '../../../src/shell/chat/chat-controller';
+import { ChatController, CHAT_MAX_LENGTH } from '../../../src/shell/chat/chat-controller';
 
 describe('Security Sanitization', () => {
   describe('ChatController output safety', () => {
@@ -81,8 +81,8 @@ describe('Security Sanitization', () => {
       // Message should be truncated to CHAT_MAX_LENGTH (1000) + timestamp prefix
       const contentLen = entry.textContent!.length;
       const payloadLen = longText.slice(0, 1000).length;
-      // textContent = `[HH:MM:SS] AAAA...` so length is timestamp (~10-11) + 1 space + payload
-      expect(contentLen).toBeLessThan(20 + 1000); // well under 100000
+      // textContent = `[HH:MM:SS] email (role): AAAA...` so length is prefix + payload
+      expect(contentLen).toBeLessThan(CHAT_MAX_LENGTH + 100); // well under 100000
       // Verify no raw HTML injection (innerHTML should be escaped text, not contain tags)
       expect(entry.innerHTML).not.toContain('<');
     });

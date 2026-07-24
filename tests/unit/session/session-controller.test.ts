@@ -90,7 +90,7 @@ vi.mock('../../../src/shell/signaling-client', () => {
 });
 
 // Need to import after mocks are set up
-import { SessionController } from '../../../src/shell/session-controller';
+import { SessionController } from '../../../src/shell/session-controller.ts';
 
 // ── Helpers ──
 function fireSignalingEvent(type: string, msg: any) {
@@ -289,8 +289,8 @@ describe('D.6 — Old room active while replacement negotiates', () => {
       oldHostEmail: 'oldhost@test.com',
       hostEmail: 'peer@test.com',
       participants: [
-        { email: 'oldhost@test.com', isHost: true },
-        { email: 'peer@test.com', isHost: false },
+        { email: 'oldhost@test.com', role: 'host' },
+        { email: 'peer@test.com', role: 'peer' },
       ],
     });
 
@@ -337,8 +337,8 @@ describe('D.7 — Failed replacement preserves old room', () => {
       oldHostEmail: 'oldhost@test.com',
       hostEmail: 'peer@test.com',
       participants: [
-        { email: 'oldhost@test.com', isHost: true },
-        { email: 'peer@test.com', isHost: false },
+        { email: 'oldhost@test.com', role: 'host' },
+        { email: 'peer@test.com', role: 'peer' },
       ],
     });
 
@@ -383,9 +383,9 @@ describe('D.8 — Promotion commit switches role once', () => {
       oldHostEmail: 'oldhost@test.com',
       hostEmail: 'peer@test.com',
       participants: [
-        { email: 'oldhost@test.com', isHost: true },
-        { email: 'peer@test.com', isHost: false },
-        { email: 'other@test.com', isHost: false },
+        { email: 'oldhost@test.com', role: 'host' },
+        { email: 'peer@test.com', role: 'peer' },
+        { email: 'other@test.com', role: 'peer' },
       ],
     });
 
@@ -428,9 +428,9 @@ describe('D.9 — Previous host included in reconnect targets', () => {
       oldHostEmail: 'oldhost@test.com',
       hostEmail: 'peer@test.com',
       participants: [
-        { email: 'oldhost@test.com', isHost: true },
-        { email: 'peer@test.com', isHost: false },
-        { email: 'other@test.com', isHost: false },
+        { email: 'oldhost@test.com', role: 'host' },
+        { email: 'peer@test.com', role: 'peer' },
+        { email: 'other@test.com', role: 'peer' },
       ],
     });
 
@@ -442,6 +442,218 @@ describe('D.9 — Previous host included in reconnect targets', () => {
     expect(intendedEmails).toContain('oldhost@test.com');
     expect(intendedEmails).toContain('other@test.com');
     expect(intendedEmails).not.toContain('peer@test.com');
+  });
+});
+
+// ── CHAT: host resolves sender identity from peerId-email map ──
+describe('Chat — host resolves sender identity', () => {
+  it('resolves sender for plain text messages from known peer', async () => {
+    const ctrl = new SessionController();
+    await ctrl.createRoom('host@test.com');
+    const room = latestRoom();
+
+    let chatSender = '';
+    let chatText = '';
+    ctrl.onChatMessage = (sender, text) => {
+      chatSender = sender;
+      chatText = text;
+    };
+
+    // Simulate peer connecting and sending their email
+    if (room._onPeerJoinCb) room._onPeerJoinCb('peer-uuid-123');
+
+    // Send [EMAIL] to update the peerEmails map
+    if (room._onMessageCb) {
+      const emailText = new TextEncoder().encode('[EMAIL]peer-real@test.com');
+      const data = new Uint8Array(1 + emailText.length);
+      data[0] = 0x00;
+      data.set(emailText, 1);
+      room._onMessageCb(data, 'peer-uuid-123');
+    }
+
+    // Now send a plain text message from the same peer (no JSON envelope)
+    // Plain text goes through the backward-compat path which resolves sender
+    if (room._onMessageCb) {
+      const plainText = new TextEncoder().encode('Hello from peer!');
+      const data = new Uint8Array(1 + plainText.length);
+      data[0] = 0x00;
+      data.set(plainText, 1);
+      room._onMessageCb(data, 'peer-uuid-123');
+    }
+
+    // Plain text messages resolve sender from peerEmails map
+    expect(chatSender).toBe('peer-real@test.com');
+    expect(chatText).toBe('Hello from peer!');
+  });
+
+  it('falls back to peerId when email not yet known', async () => {
+    const ctrl = new SessionController();
+    await ctrl.createRoom('host@test.com');
+    const room = latestRoom();
+
+    let chatSender = '';
+    ctrl.onChatMessage = (sender) => { chatSender = sender; };
+
+    // Send plain text from unknown peer (no [EMAIL] sent yet, no peer join)
+    if (room._onMessageCb) {
+      const plainText = new TextEncoder().encode('Hi');
+      const data = new Uint8Array(1 + plainText.length);
+      data[0] = 0x00;
+      data.set(plainText, 1);
+      room._onMessageCb(data, 'unknown-peer');
+    }
+
+    // Falls back to raw peerId
+    expect(chatSender).toBe('unknown-peer');
+  });
+
+  it('structured chat messages use envelope sender directly', async () => {
+    const ctrl = new SessionController();
+    await ctrl.createRoom('host@test.com');
+    const room = latestRoom();
+
+    let chatSender = '';
+    ctrl.onChatMessage = (sender) => { chatSender = sender; };
+
+    // Send structured chat (JSON envelope) — uses envelope.sender directly
+    if (room._onMessageCb) {
+      const json = JSON.stringify({ type: 'chat', sender: 'display-name', text: 'Hello!', senderRole: 'host' });
+      const env = new TextEncoder().encode(json);
+      const data = new Uint8Array(1 + env.length);
+      data[0] = 0x00;
+      data.set(env, 1);
+      room._onMessageCb(data, 'peer-real-id');
+    }
+
+    // Structured messages use envelope.sender, NOT the resolved peerId
+    expect(chatSender).toBe('display-name');
+  });
+});
+
+// ── SNAPSHOT: applyRoomSnapshot stale version and roomId mismatch ──
+describe('Snapshot — applyRoomSnapshot version gate and roomId validation', () => {
+  it('should reject stale version (version <= _lastRoomStateVersion)', async () => {
+    const ctrl = new SessionController();
+    await ctrl.peerAutoJoin('test-token', 'peer@test.com');
+
+    ctrl.onRoomState = vi.fn();
+
+    // Apply initial snapshot v5
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 5,
+      hostParticipantId: 'host1',
+      participants: [{ email: 'host@test.com', role: 'host', participantId: 'host1', connected: true, joinOrder: 1 }],
+    });
+
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(1);
+    expect(ctrl.participants.length).toBe(1);
+    expect(ctrl.participants[0].email).toBe('host@test.com');
+
+    // Apply stale snapshot v3 (less than v5) — should be rejected
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 3,
+      hostParticipantId: 'old-host',
+      participants: [{ email: 'old@test.com', role: 'host', participantId: 'old-host', connected: true, joinOrder: 1 }],
+    });
+
+    // onRoomState should still be 1 (stale rejected), participants unchanged
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(1);
+    expect(ctrl.participants[0].email).toBe('host@test.com');
+  });
+
+  it('should reject snapshot with mismatched roomId', async () => {
+    const ctrl = new SessionController();
+    await ctrl.peerAutoJoin('test-token', 'peer@test.com');
+
+    ctrl.onRoomState = vi.fn();
+
+    // Apply snapshot with wrong roomId
+    ctrl.applyRoomSnapshot({
+      roomId: 'wrong-room-id',
+      version: 10,
+      hostParticipantId: 'intruder',
+      participants: [{ email: 'intruder@test.com', role: 'host', participantId: 'intruder', connected: true, joinOrder: 1 }],
+    });
+
+    // onRoomState should NOT be called (roomId rejected)
+    expect(ctrl.onRoomState).not.toHaveBeenCalled();
+    expect(ctrl.participants.length).toBe(0);
+  });
+
+  it('should apply snapshot with empty roomId (backward compat)', async () => {
+    const ctrl = new SessionController();
+    await ctrl.peerAutoJoin('test-token', 'peer@test.com');
+
+    ctrl.onRoomState = vi.fn();
+
+    // Apply snapshot with empty roomId — passes validation
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 7,
+      hostParticipantId: 'host1',
+      participants: [{ email: 'host@test.com', role: 'host', participantId: 'host1', connected: true, joinOrder: 1 }],
+    });
+
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(1);
+    expect(ctrl.participants[0].email).toBe('host@test.com');
+  });
+
+  it('should apply newer version and update hostParticipantId tracking', async () => {
+    const ctrl = new SessionController();
+    await ctrl.peerAutoJoin('test-token', 'peer@test.com');
+
+    ctrl.onRoomState = vi.fn();
+
+    // v1: initial with host1
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 1,
+      hostParticipantId: 'host1',
+      participants: [{ email: 'host1@test.com', role: 'host', participantId: 'host1', connected: true, joinOrder: 1 }],
+    });
+
+    expect(ctrl.hostParticipantId).toBe('host1');
+
+    // v2: host changed to host2
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 2,
+      hostParticipantId: 'host2',
+      participants: [{ email: 'host2@test.com', role: 'host', participantId: 'host2', connected: true, joinOrder: 1 }],
+    });
+
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(2);
+    expect(ctrl.hostParticipantId).toBe('host2');
+    expect(ctrl.participants[0].email).toBe('host2@test.com');
+  });
+
+  it('should apply same version snapshot (not stale, version > last)', async () => {
+    // Version check: snapshot.version > _lastRoomStateVersion
+    // v3 is accepted after processing v2, but v2 again after v2 is rejected
+    const ctrl = new SessionController();
+    await ctrl.peerAutoJoin('test-token', 'peer@test.com');
+
+    ctrl.onRoomState = vi.fn();
+
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 2,
+      hostParticipantId: 'host1',
+      participants: [{ email: 'host1@test.com', role: 'host', participantId: 'host1', connected: true, joinOrder: 1 }],
+    });
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(1);
+
+    // Same version (2) is NOT > last (2) — should be rejected
+    ctrl.applyRoomSnapshot({
+      roomId: '',
+      version: 2,
+      hostParticipantId: 'host2',
+      participants: [{ email: 'host2@test.com', role: 'host', participantId: 'host2', connected: true, joinOrder: 1 }],
+    });
+    expect(ctrl.onRoomState).toHaveBeenCalledTimes(1); // still 1
+    expect(ctrl.hostParticipantId).toBe('host1'); // unchanged
   });
 });
 

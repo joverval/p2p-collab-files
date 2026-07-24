@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Rainbow chat bubble icon</title>
+  <desc id="desc">A white chat bubble with a thick seven-color rainbow outline on a transparent background.</desc>
+
+  <defs>
+    <linearGradient id="rainbow" x1="72" y1="72" x2="440" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF0000"/>
+      <stop offset="16.67%" stop-color="#FF7F00"/>
+      <stop offset="33.33%" stop-color="#FFFF00"/>
+      <stop offset="50%" stop-color="#00A651"/>
+      <stop offset="66.67%" stop-color="#0072FF"/>
+      <stop offset="83.33%" stop-color="#4B0082"/>
+      <stop offset="100%" stop-color="#8B00FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Transparent background -->
+  <path
+    d="M126 80
+       H386
+       C428 80 462 114 462 156
+       V310
+       C462 352 428 386 386 386
+       H267
+       L176 452
+       C164 461 147 452 150 437
+       L161 386
+       H126
+       C84 386 50 352 50 310
+       V156
+       C50 114 84 80 126 80
+       Z"
+    fill="#FFFFFF"
+    stroke="url(#rainbow)"
+    stroke-width="34"
+    stroke-linejoin="round"
+  />
+</svg>

@@ -11,7 +11,7 @@ import type { Config } from 'dompurify';
  * Allows http, https, mailto, ftp, tel, and relative URLs.
  */
 const SAFE_URI_REGEX =
-  /^(?:(?:https?|mailto|ftp|tel):|[^a-z]|[a-z+.-]+(?:[^a-z+.-]+|$))/i;
+  /^(?:(?:https?|mailto|ftp|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
 
 /**
  * Tags explicitly stripped even if DOMPurify's defaults change.
@@ -33,6 +33,7 @@ const FORBID_TAGS = [
  * defense-in-depth.
  */
 const FORBID_ATTR = [
+  'style',
   'onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur',
   'onchange', 'onsubmit', 'oninput', 'onkeydown', 'onkeyup',
   'ondblclick', 'oncontextmenu', 'oninvalid', 'onreset', 'onsearch',
@@ -42,12 +43,24 @@ const FORBID_ATTR = [
   'formaction',
 ];
 
+/** Tags explicitly allowed. Everything else is stripped (including tags
+ *  not invented yet). Matches the markdown preview security spec. */
+const ALLOWED_TAGS = [
+  'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'ul', 'ol', 'li',
+  'a',
+  'code', 'pre',
+  'em', 'strong',
+  'br',
+];
+
 export const PURIFY_CONFIG: Config = Object.freeze({
+  ALLOWED_TAGS,
   FORBID_TAGS,
   FORBID_ATTR,
   ALLOWED_URI_REGEXP: SAFE_URI_REGEX,
   ALLOW_UNKNOWN_PROTOCOLS: false,
-  KEEP_CONTENT: true, // Keep text content of forbidden tags (strip tag, keep text)
+  KEEP_CONTENT: true, // Keep text content of stripped tags
   RETURN_DOM_FRAGMENT: false,
   RETURN_DOM: false,
   WHOLE_DOCUMENT: false,

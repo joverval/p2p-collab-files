@@ -7,9 +7,22 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
-import { validateIncoming, MAX_WS_PAYLOAD, MAX_OFFERS_PER_ROOM, MAX_PROMOTIONS_PER_ROOM } from './relay-schemas.js';
+import { validateIncoming, validateToken, MAX_WS_PAYLOAD, MAX_OFFERS_PER_ROOM, MAX_PROMOTIONS_PER_ROOM } from './relay-schemas.js';
 import { RateLimiter, IPTracker } from './rate-limiter.js';
 import { generateTurnCredentials } from './auth.js';
+
+// ── Log level control ──
+// LOG_LEVEL env: 'error' | 'warn' | 'info' | 'debug'
+// Default: 'warn' in production, 'debug' otherwise
+const LOG_LEVEL = process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'warn' : 'debug');
+const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
+const shouldLog = (level) => LEVELS[level] <= LEVELS[LOG_LEVEL];
+export const logger = {
+  error: (...args) => { if (shouldLog('error')) console.error(...args); },
+  warn:  (...args) => { if (shouldLog('warn'))  console.warn(...args); },
+  info:  (...args) => { if (shouldLog('info'))  console.info(...args); },
+  debug: (...args) => { if (shouldLog('debug')) console.debug(...args); },
+};
 
 const DEFAULT_PORT = Number(process.env.PORT || 8083);
 const DEFAULT_TOKEN_TTL = 5 * 60 * 1000;           // 5 min for individual tokens
@@ -45,7 +58,6 @@ const DEFAULT_MAX_PEERS_PER_ROOM = 50;
  * @param {number} [options.gracePeriod]    Grace period for host reconnect in ms. Default: 10s.
  * @param {number} [options.candidateTimeout]  Candidate response timeout in ms. Default: 30s.
  * @param {number} [options.heartbeatInterval]  Heartbeat interval in ms. Default: 30s.
- * @param {number} [options.heartbeatInterval]  Heartbeat interval in ms. Default: 30s.
  * @param {object} [options.turnConfig]     TURN server config.
  * @param {number} [options.maxRoomsPerIP]  Max rooms per IP. Default: 10.
  * @param {number} [options.maxSocketsPerIP] Max WS connections per IP. Default: 20.
@@ -57,7 +69,7 @@ export function createRelayServer(options = {}) {
   const {
     port = DEFAULT_PORT,
     clock = () => Date.now(),
-    idGenerator = () => crypto.randomBytes(18).toString('base64url'),
+    idGenerator = () => crypto.randomBytes(32).toString('base64url'),
     allowedOrigins = DEFAULT_ALLOWED_ORIGINS,
     tokenTTL = DEFAULT_TOKEN_TTL,
     offerTTL = DEFAULT_OFFER_TTL,
@@ -97,14 +109,14 @@ export function createRelayServer(options = {}) {
   }
 
   if (TURN_ENABLED && !TURN_SECRET) {
-    console.error('TURN_ENABLED=1 but TURN_SECRET not set. TURN disabled.');
+    logger.error('TURN_ENABLED=1 but TURN_SECRET not set. TURN disabled.');
     TURN_ENABLED = false;
   }
 
   if (TURN_ENABLED) {
-    console.log(`TURN enabled: ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1, ${TURN_TTL}s TTL, credentials rotate on relay restart)`);
+    logger.info(`TURN enabled: ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1, ${TURN_TTL}s TTL, credentials rotate on relay restart)`);
   } else {
-    console.log('TURN disabled — set TURN_ENABLED=1 and TURN_SECRET to enable');
+    logger.info('TURN disabled — set TURN_ENABLED=1 and TURN_SECRET to enable');
   }
 
   // ── ID generation ──
@@ -246,12 +258,12 @@ export function createRelayServer(options = {}) {
     candidates.sort((a, b) => a.joinOrder - b.joinOrder);
 
     if (candidates.length === 0) {
-      console.log(`[failover] room ${room.roomId}: no eligible candidates for failover`);
+      logger.debug(`[failover] room ${room.roomId}: no eligible candidates for failover`);
       return;
     }
 
     const candidate = candidates[0];
-    console.log(`[failover] room ${room.roomId}: initiating auto promotion to ${candidate.participantId}`);
+    logger.debug(`[failover] room ${room.roomId}: initiating auto promotion to ${candidate.participantId}`);
 
     const promotionId = genToken();
     const participantList = [];
@@ -272,7 +284,7 @@ export function createRelayServer(options = {}) {
     });
 
     const timer = setTimeout(() => {
-      console.log(`[failover] room ${room.roomId}: candidate ${candidate.participantId} timed out`);
+      logger.debug(`[failover] room ${room.roomId}: candidate ${candidate.participantId} timed out`);
       room.pendingPromotion = undefined;
       candidate._failed = true;
       initiateAutoFailover(room, departedHostEmail);
@@ -349,7 +361,7 @@ export function createRelayServer(options = {}) {
   });
 
   // ── WebSocket server (noServer mode for path isolation) ──
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WS_PAYLOAD });
 
   // Path-based WS upgrade with Origin validation
   server.on('upgrade', (request, socket, head) => {
@@ -365,14 +377,14 @@ export function createRelayServer(options = {}) {
     const isProduction = process.env.NODE_ENV === 'production';
 
     if (isProduction && !origin) {
-      console.warn('[security] WS upgrade rejected — no Origin header in production');
+      logger.warn('[security] WS upgrade rejected — no Origin header in production');
       socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
       socket.destroy();
       return;
     }
 
     if (origin && !allowedOrigins.includes(origin)) {
-      console.warn(`[security] WS upgrade rejected — origin hash:${logSafe(origin)} not in allowlist`);
+      logger.warn(`[security] WS upgrade rejected — origin hash:${logSafe(origin)} not in allowlist`);
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
       socket.destroy();
       return;
@@ -381,7 +393,7 @@ export function createRelayServer(options = {}) {
     // Socket limit per IP
     const upgradeIP = request.socket?.remoteAddress || 'unknown';
     if (ipTracker.socketCount(upgradeIP) >= maxSocketsPerIP) {
-      console.warn(`[security] WS upgrade rejected — IP hash:${logSafe(upgradeIP)} exceeded socket limit`);
+      logger.warn(`[security] WS upgrade rejected — IP hash:${logSafe(upgradeIP)} exceeded socket limit`);
       socket.write('HTTP/1.1 429 Too Many Requests\r\n\r\n');
       socket.destroy();
       return;
@@ -392,14 +404,15 @@ export function createRelayServer(options = {}) {
     });
   });
 
-  // Periodic heartbeat
+  // Periodic heartbeat — terminate after 2+ missed pongs (60s with 30s interval)
   const hbInterval = setInterval(() => {
     wss.clients.forEach((ws) => {
-      if (ws.isAlive === false) {
+      // ponytail: counter over boolean — need 2 consecutive misses for 60s timeout
+      ws._pongMisses = (ws._pongMisses || 0) + 1;
+      if (ws._pongMisses >= 2) {
         wsMeta.delete(ws);
         return ws.terminate();
       }
-      ws.isAlive = false;
       ws.ping();
     });
   }, heartbeatInterval);
@@ -408,7 +421,7 @@ export function createRelayServer(options = {}) {
 
   wss.on('connection', (ws) => {
     wsMeta.set(ws, { lastPong: clock() });
-    ws.isAlive = true;
+    ws._pongMisses = 0;
 
     // Track socket per IP
     const wsIP = getRemoteIP(ws);
@@ -417,19 +430,27 @@ export function createRelayServer(options = {}) {
     ws.on('pong', () => {
       const meta = wsMeta.get(ws);
       if (meta) meta.lastPong = clock();
-      ws.isAlive = true;
+      ws._pongMisses = 0;
     });
 
+    // Suppress unhandled ws protocol errors (e.g. maxPayload exceeded)
+    ws.on('error', () => {});
+
     ws.on('message', (raw) => {
-      // Payload size check
+      // Payload size check — close on violation (1009 = Message Too Big)
       if (raw.byteLength > MAX_WS_PAYLOAD) {
         respond(ws, { type: 'error', code: 'PAYLOAD_TOO_LARGE', message: `Message exceeds ${MAX_WS_PAYLOAD} byte limit` });
+        ws.close(1009, 'Message too large');
         return;
       }
 
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch {
-        respond(ws, { type: 'error', code: 'INVALID_MESSAGE', message: 'Invalid JSON' });
+        // Silently ignore unparseable garbage — don't reflect noise back
+        return;
+      }
+      if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) {
+        // Silently ignore null, primitives, arrays — not valid protocol messages
         return;
       }
 
@@ -483,6 +504,8 @@ export function createRelayServer(options = {}) {
 
         // ── fetch-offer ──
         case 'fetch-offer': {
+          const tokenCheck = validateToken(msg.token);
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
           const info = tokenRoom.get(msg.token);
           if (!info) { respond(ws, { type: 'error', message: 'Token not found or expired' }, requestId); return; }
           const room = rooms.get(info.roomId);
@@ -496,6 +519,8 @@ export function createRelayServer(options = {}) {
 
         // ── submit-answer ──
         case 'submit-answer': {
+          const tokenCheck = validateToken(msg.token);
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
           const info = tokenRoom.get(msg.token);
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
@@ -555,6 +580,8 @@ export function createRelayServer(options = {}) {
 
         // ── host-approve ──
         case 'host-approve': {
+          const tokenCheck = validateToken(msg.token);
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
           const info = tokenRoom.get(msg.token);
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
@@ -573,6 +600,8 @@ export function createRelayServer(options = {}) {
 
         // ── host-reject ──
         case 'host-reject': {
+          const tokenCheck = validateToken(msg.token);
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
           const info = tokenRoom.get(msg.token);
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
@@ -594,12 +623,23 @@ export function createRelayServer(options = {}) {
 
         // ── become-host (v1 failover) ──
         case 'become-host': {
+          const tokenCheck = validateToken(msg.oldToken);
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
           const info = tokenRoom.get(msg.oldToken);
           if (!info) { respond(ws, { type: 'error', message: 'Old token not found' }, requestId); return; }
+
+          // ponytail: reject unbound tokens (must carry participantId from store-offer)
+          if (!info.participantId) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Token not bound to a participant' }, requestId);
+            return;
+          }
+
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
 
-          // Authorization: the caller must be a room member
+          // Authorization: the sender must be a room member.
+          // participantId mismatch is expected here — the old token belongs to
+          // the departed host; the peer is claiming the room via failover.
           const sender = getSenderInfo(ws);
           if (!sender || sender.room.roomId !== room.roomId) {
             respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
@@ -630,15 +670,23 @@ export function createRelayServer(options = {}) {
 
         // ── store-offer-next ──
         case 'store-offer-next': {
-          const room = msg.roomId ? rooms.get(msg.roomId) : null;
-          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+          // ponytail: derive room from sender identity, not msg.roomId
+          const sender = getSenderInfo(ws);
+          if (!sender || !sender.room) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+            return;
+          }
+          const room = sender.room;
 
-          if (!requireHost(ws, room, requestId)) return;
+          if (sender.participantId !== room.hostParticipantId) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Host only' }, requestId);
+            return;
+          }
 
           if (room.graceTimer) {
             clearTimeout(room.graceTimer);
             room.graceTimer = undefined;
-            console.log(`[failover] room ${room.roomId}: host reconnected during grace period, canceling failover`);
+            logger.debug(`[failover] room ${room.roomId}: host reconnected during grace period, canceling failover`);
           }
           if (room.pendingPromotion) {
             clearTimeout(room.pendingPromotion.timer);
@@ -666,10 +714,18 @@ export function createRelayServer(options = {}) {
 
         // ── promote-peer ──
         case 'promote-peer': {
-          const room = msg.roomId ? rooms.get(msg.roomId) : null;
-          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+          // ponytail: derive room from sender identity, not msg.roomId
+          const sender = getSenderInfo(ws);
+          if (!sender || !sender.room) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+            return;
+          }
+          const room = sender.room;
 
-          if (!requireHost(ws, room, requestId)) return;
+          if (sender.participantId !== room.hostParticipantId) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Host only' }, requestId);
+            return;
+          }
 
           const normalizedTarget = normalizeEmail(msg.targetEmail);
           if (!normalizedTarget) {
@@ -796,6 +852,32 @@ export function createRelayServer(options = {}) {
           break;
         }
 
+        // ── publish (host-only broadcast to room peers) ──
+        case 'publish': {
+          const sender = getSenderInfo(ws);
+          if (!sender || !sender.room) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Not a room member' }, requestId);
+            return;
+          }
+          const room = sender.room;
+
+          if (sender.participantId !== room.hostParticipantId) {
+            respond(ws, { type: 'error', code: 'UNAUTHORIZED', message: 'Host only' }, requestId);
+            return;
+          }
+
+          // Broadcast to all connected peers (skip the host)
+          for (const [, participant] of room.participants) {
+            if (participant.role === 'host') continue;
+            if (participant.ws && participant.ws.readyState === 1) {
+              sendJson(participant.ws, { type: 'publish', payload: msg.payload, from: 'host' });
+            }
+          }
+          room.lastActivityAt = clock();
+          respond(ws, { type: 'publish-ack' }, requestId);
+          break;
+        }
+
         // ── ping/pong ──
         case 'ping': {
           respond(ws, { type: 'pong' }, requestId);
@@ -816,10 +898,10 @@ export function createRelayServer(options = {}) {
           const departedHostPid = departedHost?.participantId || null;
 
           if (departedHostEmail) {
-            console.log(`[failover] room ${roomId}: host ${departedHostPid} disconnected, starting ${gracePeriod/1000}s grace period`);
+            logger.info(`[failover] room ${roomId}: host ${departedHostPid} disconnected, starting ${gracePeriod/1000}s grace period`);
             room.graceTimer = setTimeout(() => {
               room.graceTimer = undefined;
-              console.log(`[failover] room ${roomId}: grace period expired, initiating auto failover`);
+              logger.info(`[failover] room ${roomId}: grace period expired, initiating auto failover`);
               initiateAutoFailover(room, departedHostEmail);
             }, gracePeriod);
           }
@@ -983,5 +1065,5 @@ export function createRelayServer(options = {}) {
 // Auto-start when run directly (not when imported by tests)
 if (!process.env.VITEST && !process.env.VITEST_WORKER_ID) {
   const relay = createRelayServer();
-  relay.start().then(port => console.log(`Relay listening on port ${port}`));
+  relay.start().then(port => logger.info(`Relay listening on port ${port}`));
 }

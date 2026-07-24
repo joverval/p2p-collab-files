@@ -342,10 +342,10 @@ button.handshake-btn:hover { background: #444; }
 #preview a { color: var(--accent); font-weight: 600; }
 #preview ul, #preview ol { padding-left: 24px; margin-bottom: 8px; }
 
-/* CodeMirror — kept dark */
+/* CodeMirror — layout-only rules (colors via Monokai extension theme in editor-controller.ts) */
 #editor .cm-editor { height: 100%; }
 #editor .cm-editor .cm-scroller { overflow: auto; }
-#editor .cm-editor .cm-content { white-space: pre-wrap !important; }
+#editor .cm-editor .cm-content { white-space: pre-wrap; }
 #editor .cm-editor .cm-line { word-break: break-word; }
 
 /* Mobile toggle */
@@ -524,17 +524,6 @@ button.handshake-btn:hover { background: #444; }
   text-overflow: ellipsis;
   max-width: 200px;
 }
-
-/* ═══════════════════════════════════════════
-   CodeMirror Dark Theme (kept)
-   ═══════════════════════════════════════════ */
-.cm-editor { background: var(--bg-editor) !important; }
-.cm-editor .cm-gutters {
-  background: var(--bg-editor) !important;
-  border-right: 1px solid #21262d !important;
-  color: #484f58 !important;
-}
-.cm-editor .cm-activeLineGutter { background: #161b22 !important; }
 
 /* ═══════════════════════════════════════════
    Accessibility

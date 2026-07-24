@@ -1,10 +1,12 @@
-// Session controller v1.2 — room creation, joining, promotion, failover
+// Session controller v1.3 — room creation, joining, promotion, failover
 // Uses SignalingClient for permanent WS router. Separates roomId from offerToken.
+// Now owns canonical room snapshot — publishes [ROOM_STATE] on all state changes.
 
 import { P2PRoom } from '@joverval/p2p-collab';
 import type { Room } from '@joverval/p2p-collab';
 import { encodeChat, encodeStructuredChat, encodeYjs, decodeMessage } from './protocol/message-envelope';
 import type { Participant } from './participants/participants-controller';
+import type { RoomSnapshot } from '../shared/types';
 import { SignalingClient } from './signaling-client';
 
 export type ConnectionState = 'idle' | 'signaling' | 'negotiating' | 'connected' | 'reconnecting' | 'failed' | 'closed';
@@ -38,6 +40,43 @@ export class SessionController {
   private _processedPromotionIds = new Set<string>();
   private _roomStateVersion = 0;
   private _lastRoomStateVersion = 0;
+  private _participants: Participant[] = [];
+  private _hostEmail = '';
+  private _localParticipantId = '';
+  private _hostParticipantId = '';
+
+  // ── Participant tracking (SessionController owns the canonical list) ──
+
+  addParticipant(p: Participant): void {
+    const idx = this._participants.findIndex(x => x.email === p.email);
+    if (idx >= 0) this._participants[idx] = p;
+    else this._participants.push(p);
+  }
+
+  removeParticipantByEmail(email: string): void {
+    this._participants = this._participants.filter(p => p.email !== email);
+  }
+
+  replaceParticipants(peers: Participant[]): void {
+    this._participants = [...peers];
+  }
+
+  /** Peer-side: apply a RoomSnapshot from the host, with version gate and roomId validation. */
+  applyRoomSnapshot(snapshot: RoomSnapshot): void {
+    if (snapshot.roomId && snapshot.roomId !== this._roomId) return;
+    if (snapshot.version <= this._lastRoomStateVersion) return;
+    this._lastRoomStateVersion = snapshot.version;
+    this._participants = [...snapshot.participants];
+    // Update host tracking from snapshot
+    this._hostParticipantId = snapshot.hostParticipantId;
+    const hostP = snapshot.participants.find(p => p.role === 'host');
+    if (hostP) this._hostEmail = hostP.email;
+    // Peer stays non-host; onRoleChanged fires if host changed
+    this._isHost = false;
+    this.onRoomState?.(snapshot);
+  }
+
+  get participants(): Participant[] { return this._participants; }
 
   // Callbacks
   onLog?: (type: string, text: string) => void;
@@ -48,7 +87,7 @@ export class SessionController {
   onFeatureData?: (data: Uint8Array, peerId: string) => void;
   onControlMessage?: (text: string) => void;
   onChatMessage?: (sender: string, text: string, senderRole?: string) => void;
-  onRoomState?: (peers: Participant[]) => void;
+  onRoomState?: (snapshot: RoomSnapshot) => void;
   onRoleChanged?: (isHost: boolean, hostEmail: string) => void;
   getEmail?: () => string;
   setConnected?: (v: boolean) => void;
@@ -87,6 +126,7 @@ export class SessionController {
       this._connectionState = 'negotiating';
       const newPeer = new P2PRoom(false, this._baseUrl, {
         rtcConfig,
+        trickle: true,
         onConnect: () => {
           this._connectionState = 'connected';
           this.setConnected?.(true);
@@ -94,6 +134,7 @@ export class SessionController {
           // Now close old room — replacement is connected
           oldRoom?.close();
           this.onRoleChanged?.(false, m.hostEmail);
+          this.publishRoomSnapshot();
           newPeer.getConnectionRoute().then(r => {
             const label = r.kind === 'turn' ? 'TURN relay' : r.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
             this.onConnected?.(label);
@@ -117,10 +158,19 @@ export class SessionController {
   get connectionState(): ConnectionState { return this._connectionState; }
   get isConnected(): boolean { return this._connectionState === 'connected'; }
   get signalingListenerCount(): number { return this.signaling.listenerCount; }
+  get localParticipantId(): string { return this._localParticipantId; }
+  get hostParticipantId(): string { return this._hostParticipantId; }
 
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
     this._isHost = true;
+    this._hostEmail = email;
+    this._hostParticipantId = 'host';
+    this._localParticipantId = 'host';
+
+    // Track host as first participant
+    this._participants = [{ email, role: 'host', participantId: 'host', connected: true, joinOrder: 1 }];
+
     let useRelay = false;
     try { await this.signaling.connect(); useRelay = true; } catch { this.onLog?.('system', '⚠️ Relay unavailable — manual mode'); }
 
@@ -131,15 +181,19 @@ export class SessionController {
     this._connectionState = 'negotiating';
     const r = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
+      trickle: true,
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerLeave: (peerId: string) => {
         const pe = this._peerEmails.get(peerId) || peerId;
         this._peerEmails.delete(peerId);
+        this.removeParticipantByEmail(pe);
+        this.publishRoomSnapshot();
         this.onPeerLeave?.(pe);
       },
       onPeerConnect: (_peerId: string) => {
         this._connectionState = 'connected';
         this.setConnected?.(true);
+        this.publishRoomSnapshot();
       },
     });
     const { url, offerId } = await r.offerUrl();
@@ -155,6 +209,7 @@ export class SessionController {
     }
 
     this.setupRoomHandlers(r, useRelay);
+    this.publishRoomSnapshot();
     return useRelay;
   }
 
@@ -165,14 +220,32 @@ export class SessionController {
       if (d.type === 'yjs') {
         this.onFeatureData?.(data, peerId);
         r.broadcastExcept(data, peerId);
+      } else if (d.type === 'chat-control') {
+        const msg = d.control.message;
+        const sender = msg.senderEmail || (this._peerEmails.get(peerId) || peerId);
+        this.onChatMessage?.(sender, msg.text, msg.senderRole);
+        r.broadcastExcept(data);
       } else {
         const sender = this._peerEmails.get(peerId) || peerId;
         if (d.text.startsWith('[EMAIL]')) {
-          this._peerEmails.set(peerId, d.text.slice(7));
+          const email = d.text.slice(7);
+          this._peerEmails.set(peerId, email);
+          // Find participant by participantId (may have been added by onPeerJoin, or not yet)
+          const p = this._participants.find(x => x.participantId === peerId);
+          if (p) {
+            p.email = email;
+          } else {
+            // onPeerJoin hasn't fired yet — add placeholder (onPeerJoin will set connected=true)
+            this.addParticipant({ email, role: 'peer', participantId: peerId, connected: false, joinOrder: this._participants.length + 1 });
+          }
+          this.publishRoomSnapshot();
         } else if (d.text.startsWith('[SYNC]') || d.text.startsWith('[FILENAME]')) {
           this.onControlMessage?.(d.text);
-        } else if (d.text.startsWith('[CHKSUM]') || d.text.startsWith('[ROOM]')) {
-          // ignore — host is the authority for room state, checksums are internal
+        } else if (d.text.startsWith('[CHKSUM]') || d.text.startsWith('[ROOM_STATE]') || d.text.startsWith('[ROOM]') || d.text.startsWith('[USERS]')) {
+          // Host is sole authority for room membership — reject state from peers
+          if (d.text.startsWith('[ROOM_STATE]')) {
+            console.warn('Protocol: host received room-state from peer (ignored)');
+          }
         } else {
           const envelope = tryParseChatEnvelope(d.text);
           if (envelope) {
@@ -187,9 +260,19 @@ export class SessionController {
     });
 
     r.onPeerJoin(async (peerId) => {
-      const pe = peerId;
+      // Use real email if [EMAIL] arrived before onPeerJoin (race condition fix)
+      const pe = this._peerEmails.get(peerId) || peerId;
       this._peerEmails.set(peerId, pe);
       this.setConnected?.(true);
+      // Upsert: update existing participant (from early [EMAIL]) or add new one
+      const existing = this._participants.find(x => x.participantId === peerId);
+      if (existing) {
+        existing.email = pe;
+        existing.connected = true;
+      } else {
+        this.addParticipant({ email: pe, role: 'peer', participantId: peerId, connected: true, joinOrder: this._participants.length + 1 });
+      }
+      this.publishRoomSnapshot();
       this.onPeerJoin?.(peerId, pe);
       if (useRelay) {
         try {
@@ -226,7 +309,7 @@ export class SessionController {
   }
 
   // ── Host: reject ──
-  rejectPeer(token: string) { this.signaling.send({ type: 'host-reject', token }); }
+  rejectPeer(token: string) { this.signaling.send({ type: 'host-reject', token }); this.publishRoomSnapshot(); }
 
   // ── Host (manual mode): accept answer URL with explicit offerId ──
   manualAcceptAnswer(offerId: string, signalUrl: string): void {
@@ -246,6 +329,7 @@ export class SessionController {
   // ── Peer: join ──
   async peerAutoJoin(parsed: string, email: string): Promise<void> {
     this._isHost = false;
+    this._localParticipantId = email;
     let useRelay = false, offerB64 = '';
     const isToken = !parsed.startsWith('manual:');
     if (isToken) { try { await this.signaling.connect(); useRelay = true; } catch {} }
@@ -264,9 +348,12 @@ export class SessionController {
     this._connectionState = 'negotiating';
     const peer = new P2PRoom(false, this._baseUrl, {
       rtcConfig,
+      trickle: true,
       onConnect: () => {
         this._connectionState = 'connected';
         this.setConnected?.(true);
+        // ponytail: send email to host for participant list
+        peer.send(encodeChat(`[EMAIL]${email}`));
         peer.getConnectionRoute().then(r => {
           const label = r.kind === 'turn' ? 'TURN relay' : r.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
           this.onConnected?.(label);
@@ -285,27 +372,26 @@ export class SessionController {
     peer.onMessage((data) => {
       if (!(data instanceof Uint8Array)) return;
       const d = decodeMessage(data);
-      if (d.type === 'yjs') { this.onFeatureData?.(data, 'host'); }
-      else {
-        if (d.text.startsWith('[USERS]')) { try { const ud = JSON.parse(d.text.slice(7)); this.onRoomState?.(ud.users); } catch {} }
-        else if (d.text.startsWith('[ROOM]')) {
-          try {
-            const rd = JSON.parse(d.text.slice(5));
-            const v: number = rd.v ?? 0;
-            if (v <= this._lastRoomStateVersion) return; // stale/duplicate
-            this._lastRoomStateVersion = v;
-            this.onRoomState?.(rd.peers);
-          } catch {}
-        }
-        else if (d.text.startsWith('[FILENAME]') || d.text.startsWith('[SYNC]')) { this.onControlMessage?.(d.text); }
-        else if (d.text.startsWith('[PROMOTE]')) { /* handled via relay promote-peer now */ }
-        else {
-          const envelope = tryParseChatEnvelope(d.text);
-          if (envelope) {
-            this.onChatMessage?.(envelope.sender, envelope.text, envelope.senderRole);
-          } else {
-            this.onChatMessage?.('Host', d.text, 'host');
-          }
+      if (d.type === 'yjs') {
+        this.onFeatureData?.(data, 'host');
+      } else if (d.type === 'chat-control') {
+        const msg = d.control.message;
+        this.onChatMessage?.(msg.senderEmail || 'Host', msg.text, msg.senderRole);
+      } else if (d.text.startsWith('[ROOM_STATE]')) {
+        try {
+          const snap: RoomSnapshot = JSON.parse(d.text.slice(12));
+          this.applyRoomSnapshot(snap);
+        } catch {}
+      } else if (d.text.startsWith('[FILENAME]') || d.text.startsWith('[SYNC]')) {
+        this.onControlMessage?.(d.text);
+      } else if (d.text.startsWith('[PROMOTE]')) {
+        /* handled via relay promote-peer now */
+      } else {
+        const envelope = tryParseChatEnvelope(d.text);
+        if (envelope) {
+          this.onChatMessage?.(envelope.sender, envelope.text, envelope.senderRole);
+        } else {
+          this.onChatMessage?.('Host', d.text, 'host');
         }
       }
     });
@@ -320,6 +406,13 @@ export class SessionController {
     try {
       await this.signaling.request({ type: 'promote-peer', roomId: this._roomId, targetEmail });
       // Use response directly: promotion accepted by relay, old host transitions to peer now
+      this._isHost = false;
+      // Update own role in participants
+      const self = this._participants.find(p => p.email === this.getEmail?.());
+      if (self) self.role = 'peer';
+      const target = this._participants.find(p => p.email === targetEmail);
+      if (target) target.role = 'host';
+      this.publishRoomSnapshot();
       this.onRoleChanged?.(false, targetEmail);
       this.onLog?.('system', `📤 Promotion accepted — you are now a peer; ${targetEmail} is the new host`);
     } catch (err: any) {
@@ -344,7 +437,13 @@ export class SessionController {
     const rtcConfig = await this.signaling.fetchIceConfig();
     this.nextRoom = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
+      trickle: true,
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
+      onPeerConnect: (_peerId: string) => {
+        this._connectionState = 'connected';
+        this.setConnected?.(true);
+        this.publishRoomSnapshot();
+      },
     });
 
     // Create reconnect offers for ALL participants (including previous host)
@@ -371,12 +470,32 @@ export class SessionController {
       this.room = this.nextRoom;
       this.nextRoom = null;
       this._roomId = msg.roomId;
-      this._connectionState = 'connected';
+      this._isHost = true;
+      this._hostParticipantId = 'host';
+      this._localParticipantId = 'host';
+
+      // Build participant list: self as new host + all reconnecting peers
+      const selfEmail = this.getEmail?.() ?? '';
+      this._participants = [
+        { email: selfEmail, role: 'host', participantId: 'host', connected: true, joinOrder: 1 },
+      ];
+      for (const p of (msg.participants || [])) {
+        if (p.email === selfEmail) continue;
+        this._participants.push({
+          email: p.email,
+          role: 'peer',
+          participantId: p.participantId || p.email,
+          connected: false, // will reconnect via new-host event
+          joinOrder: this._participants.length + 1,
+        });
+      }
+
       this._lastRoomStateVersion = 0; // reset for new host's version counter
       this.setupRoomHandlers(this.room!, true);
       // Close old peer connection AFTER new host room is ready
       oldRoom?.close();
-      this.onRoleChanged?.(true, msg.hostEmail || this.getEmail?.() || '');
+      this.publishRoomSnapshot();
+      this.onRoleChanged?.(true, msg.hostEmail || selfEmail);
       this.promotionInProgress = false;
     } catch (err: any) {
       this.onLog?.('system', `❌ Commit failed: ${err.message}`);
@@ -385,12 +504,36 @@ export class SessionController {
     }
   }
 
-  /** Broadcast canonical participant list to all peers. Host-only — peers receive via onRoomState.
-   *  Includes a monotonic version so receivers can ignore duplicates/out-of-order messages. */
-  broadcastRoomState(peers: Participant[]): void {
+  /** Build a RoomSnapshot from current internal state. */
+  private createRoomSnapshot(): RoomSnapshot {
+    const hostP = this._participants.find(p => p.role === 'host');
+    return {
+      roomId: this._roomId,
+      version: this._roomStateVersion,
+      hostParticipantId: hostP?.participantId ?? this._hostEmail,
+      participants: [...this._participants],
+    };
+  }
+
+  /** Increment version, build snapshot, broadcast [ROOM_STATE] to all peers,
+   *  and notify local callbacks. Accepts optional external peer list override. */
+  publishRoomSnapshot(peers?: Participant[]): void {
     if (!this.room) return;
     this._roomStateVersion++;
-    this.room.send(encodeChat(`[ROOM]${JSON.stringify({ peers, v: this._roomStateVersion })}`));
+    let snap: RoomSnapshot;
+    if (peers) {
+      this._participants = [...peers];
+      snap = { roomId: this._roomId, version: this._roomStateVersion, hostParticipantId: this._participants.find(p => p.role === 'host')?.participantId ?? '', participants: [...peers] };
+    } else {
+      snap = this.createRoomSnapshot();
+    }
+    this.room.send(encodeChat(`[ROOM_STATE]${JSON.stringify(snap)}`));
+    this.onRoomState?.(snap);
+  }
+
+  /** Backward-compat: accept external participant list, update internal state, publish snapshot. */
+  broadcastRoomState(peers: Participant[]): void {
+    this.publishRoomSnapshot(peers);
   }
 
   sendFeature(data: Uint8Array) { this.room?.send(encodeYjs(data)); }
@@ -399,7 +542,8 @@ export class SessionController {
   sendChatMessage(text: string) {
     const email = this.getEmail?.() ?? 'unknown';
     const role = this._isHost ? 'host' : 'peer';
-    this.room?.send(encodeStructuredChat(email, role, text));
+    const id = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    this.room?.send(encodeStructuredChat(id, this.localParticipantId, email, role, text, Date.now()));
   }
 
   /** Close the room and signaling, reject pending operations, reset state. */

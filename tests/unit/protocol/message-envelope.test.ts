@@ -2,6 +2,7 @@
 // Tests A.1–A.7: message envelope round-trips, edge cases
 
 import { describe, it, expect } from 'vitest';
+import type { ChatControlMessage } from '../../../src/shared/types';
 import { encodeChat, encodeStructuredChat, encodeYjs, decodeMessage } from '../../../src/shell/protocol/message-envelope';
 
 describe('Message Envelope', () => {
@@ -174,13 +175,20 @@ describe('Message Envelope', () => {
     expect(decoded.update[0]).toBe(0xFF);
   });
 
-  // Bonus: encodeStructuredChat round-trip
-  it('encodeStructuredChat round-trips via decodeMessage', () => {
-    const encoded = encodeStructuredChat('Alice', 'host', 'Hi there!');
+  // encodeStructuredChat round-trip with ChatControlMessage (6-arg encoding)
+  it('encodeStructuredChat round-trips via decodeMessage as chat-control', () => {
+    const encoded = encodeStructuredChat(
+      'id-01', 'pid-Alice', 'alice@test', 'host', 'Hi there!', 1700000000000
+    );
     const decoded = decodeMessage(encoded);
-    expect(decoded.type).toBe('chat');
-    const text = (decoded as { type: 'chat'; text: string }).text;
-    const parsed = JSON.parse(text);
-    expect(parsed).toEqual({ type: 'chat', sender: 'Alice', senderRole: 'host', text: 'Hi there!' });
+    expect(decoded.type).toBe('chat-control');
+    const ctrl = (decoded as { type: 'chat-control'; control: ChatControlMessage }).control;
+    expect(ctrl.kind).toBe('chat');
+    expect(ctrl.message.id).toBe('id-01');
+    expect(ctrl.message.senderParticipantId).toBe('pid-Alice');
+    expect(ctrl.message.senderEmail).toBe('alice@test');
+    expect(ctrl.message.senderRole).toBe('host');
+    expect(ctrl.message.text).toBe('Hi there!');
+    expect(ctrl.message.timestamp).toBe(1700000000000);
   });
 });

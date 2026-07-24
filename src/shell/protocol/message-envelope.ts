@@ -1,6 +1,9 @@
 // Message envelope — 1-byte prefix protocol
-// 0x00: chat/text  0x01: feature payload (Yjs)
-// Preserved exactly from original main.ts
+// 0x00: chat/control (JSON-typed body)  0x01: feature payload (Yjs)
+// 0x00 body is parsed as typed control message (ChatControlMessage);
+// plain-text fallback preserved for legacy wire compatibility.
+
+import type { ChatControlMessage } from '../../shared/types.js';
 
 export function encodeChat(text: string): Uint8Array {
   const e = new TextEncoder().encode(text);
@@ -10,8 +13,26 @@ export function encodeChat(text: string): Uint8Array {
   return m;
 }
 
-export function encodeStructuredChat(sender: string, senderRole: string, text: string): Uint8Array {
-  const payload = JSON.stringify({ type: 'chat', sender, senderRole, text });
+export function encodeStructuredChat(
+  id: string,
+  senderParticipantId: string,
+  senderEmail: string,
+  senderRole: string,
+  text: string,
+  timestamp: number
+): Uint8Array {
+  const control: ChatControlMessage = {
+    kind: 'chat',
+    message: {
+      id,
+      senderParticipantId,
+      senderEmail,
+      senderRole: senderRole as 'host' | 'peer' | 'system',
+      text,
+      timestamp
+    }
+  };
+  const payload = JSON.stringify(control);
   const e = new TextEncoder().encode(payload);
   const m = new Uint8Array(1 + e.length);
   m[0] = 0x00;
@@ -29,9 +50,24 @@ export function encodeYjs(data: Uint8Array, seq?: number): Uint8Array {
   return m;
 }
 
-export function decodeMessage(data: Uint8Array): { type: 'chat'; text: string } | { type: 'yjs'; update: Uint8Array; seq: number } {
+export function decodeMessage(data: Uint8Array):
+  | { type: 'chat-control'; control: ChatControlMessage }
+  | { type: 'chat'; text: string }
+  | { type: 'yjs'; update: Uint8Array; seq: number } {
   if (data.length === 0) return { type: 'chat', text: '' };
   if (data[0] === 0x01) return { type: 'yjs', update: data.slice(3), seq: (data[1] << 8) | data[2] };
   const s = data[0] === 0x00 ? 1 : 0;
-  return { type: 'chat', text: new TextDecoder().decode(data.slice(s)) };
+  const body = new TextDecoder().decode(data.slice(s));
+
+  // Parse 0x00 body as typed control message (JSON with `kind` discriminator).
+  // Fall back to raw text for legacy wire formats and non-chat control strings.
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed === 'object' && parsed.kind === 'chat' &&
+        parsed.message && typeof parsed.message === 'object') {
+      return { type: 'chat-control', control: parsed as ChatControlMessage };
+    }
+  } catch {}
+
+  return { type: 'chat', text: body };
 }

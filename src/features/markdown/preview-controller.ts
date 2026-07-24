@@ -1,8 +1,37 @@
 // Preview controller — markdown rendering with debounce and XSS sanitization
 
 import { $ } from '../../shared/dom';
-import { sanitizePreview } from '../../shared/dompurify-config';
+import DOMPurify from 'dompurify';
+import type { Config } from 'dompurify';
 import type * as Y from 'yjs';
+
+const PURIFY_CFG: Config = Object.freeze({
+  ALLOWED_TAGS: [
+    'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'ul', 'ol', 'li',
+    'a',
+    'code', 'pre',
+    'em', 'strong',
+    'br',
+    'img',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'hr',
+    'blockquote',
+  ],
+  FORBID_ATTR: [
+    'style',
+    'onerror', 'onload', 'onclick', 'onmouseover', 'onfocus', 'onblur',
+    'onchange', 'onsubmit', 'oninput', 'onkeydown', 'onkeyup',
+    'ondblclick', 'oncontextmenu', 'oninvalid', 'onreset', 'onsearch',
+    'onselect', 'onwheel', 'ondrag', 'ondrop', 'oncopy', 'oncut',
+    'onpaste', 'onscroll', 'ontoggle', 'onanimationend',
+    'onanimationiteration', 'onanimationstart', 'ontransitionend',
+    'formaction',
+  ],
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|ftp|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i,
+  ALLOW_UNKNOWN_PROTOCOLS: false,
+  KEEP_CONTENT: true,
+});
 
 interface MarkedLib {
   parse(md: string): string;
@@ -37,9 +66,8 @@ export class PreviewController {
       | undefined;
     const rawHTML = marked?.parse(md) ?? md.replace(/</g, '&lt;');
 
-    // sanitizePreview uses a hardened DOMPurify config that strips:
-    // <script>, <style>, <svg>, <math>, event handlers, javascript: URIs,
-    // and data: URIs (except images).
-    panel.innerHTML = sanitizePreview(rawHTML);
+    // DOMPurify strips <script>, event handlers, javascript:/data: URIs,
+    // and only allows tags in PURIFY_CFG.ALLOWED_TAGS.
+    panel.innerHTML = DOMPurify.sanitize(rawHTML, PURIFY_CFG) as unknown as string;
   }
 }

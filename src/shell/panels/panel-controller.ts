@@ -35,6 +35,11 @@ export class PanelController {
     else if (this._currentPanel === 'chat') this.renderChat(body);
   }
 
+  /** Refresh only if the named panel is currently open. */
+  refreshIfOpen(name: string) {
+    if (this._currentPanel === name) this.refresh();
+  }
+
   open(name: string) {
     if (this._currentPanel === name) { this.close(); return; }
     this._currentPanel = name;

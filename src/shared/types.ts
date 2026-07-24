@@ -4,10 +4,16 @@
 
 export interface ChatMessage {
   id: string;
+  senderParticipantId: string;
   senderEmail: string;
   senderRole: 'host' | 'peer' | 'system';
   text: string;
   timestamp: number;
+}
+
+export interface ChatControlMessage {
+  kind: 'chat';
+  message: ChatMessage;
 }
 
 export interface ChatEnvelope {
@@ -41,6 +47,13 @@ export interface FeatureContext {
 export interface IceConfigProvider {
   getConfig(): Promise<RTCConfiguration>;
   refreshIfNeeded(): Promise<RTCConfiguration>;
+}
+
+export interface RoomSnapshot {
+  roomId: string;
+  version: number;
+  hostParticipantId: string;
+  participants: import('../shell/participants/participants-controller').Participant[];
 }
 
 // ── Signaling protocol types ──

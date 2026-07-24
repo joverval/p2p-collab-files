@@ -626,23 +626,21 @@ describe('Relay Protocol', () => {
     hostA.close(); hostB.close(); peerB.close(); peerX.close();
   });
 
-  // ── Test 11: oversized payload rejected ──
-  it('payload exceeding 128KB returns error', async () => {
+  // ── Test 11: oversized payload closes connection (server enforces maxPayload) ──
+  it('payload exceeding 128KB closes connection with code 1009', async () => {
     const ws = new WebSocket(`ws://localhost:${port}/ws`);
-    await new Promise<void>((r, rj) => { ws.on('open', r); ws.on('error', rj); });
+    ws.on('error', () => {}); // suppress ws library RangeError for oversized frames
+    await new Promise<void>((r) => { ws.on('open', r); });
 
-    // Send a message > 128KB (131072 bytes)
-    const large = 'x'.repeat(131073);
-    ws.send(large);
-
-    const result = await new Promise<any>((r, rj) => {
-      const t = setTimeout(() => rj(new Error('timeout')), 2000);
-      ws.once('message', d => { clearTimeout(t); r(JSON.parse(d.toString())); });
+    // Set up close listener BEFORE sending the oversized payload
+    const closeCode = await new Promise<number>((r) => {
+      ws.on('close', (code) => r(code));
+      // Send message > 128KB — server's maxPayload closes the connection
+      ws.send('x'.repeat(131073));
     });
 
-    expect(result.type).toBe('error');
-    expect(result.code).toBe('PAYLOAD_TOO_LARGE');
-
+    // Server enforces maxPayload at library level, closing with code 1009
+    expect(closeCode).toBe(1009);
     ws.close();
   });
 

@@ -1,93 +1,114 @@
 /**
- * E2E Test K: Repeated lifecycle and listener leaks.
+ * E2E Test J: 5-cycle create/join/leave, verify no memory leaks.
  *
- * Scenario:
- *   1. Host A opens page, creates room
- *   2. Peer B joins the room via invite URL
- *   3. Host A approves Peer B
- *   4. Peer B's editor becomes visible (connection established)
- *   5. Verify chat works between host and peer
- *   6. Check __P2P_TEST__ diagnostic API for listener counts (skip if unavailable)
- *   7. Promote Peer B → Host A becomes peer
- *   8. Verify chat still works after host promotion
- *   9. Clean up all contexts
+ * Scenario (repeated 5 times):
+ *   1. Host creates room, peer joins and is approved
+ *   2. Verify chat works between both
+ *   3. Collect signaling listener counts on both sides
+ *   4. Close both browser contexts (simulates leave/disconnect)
+ *
+ * After 5 cycles:
+ *   - Connection succeeds in every cycle
+ *   - Listener counts don't grow across cycles (no leak accumulation)
+ *   - Final cycle listener count is <= first cycle listener count (no drift)
  */
-import { test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import { createE2EHelpers } from '../helpers/e2e-helpers';
-import { PROMOTION_TIMEOUT } from '../helpers/test-constants';
 
-test('repeated lifecycle and listener leaks', async ({ browser }) => {
-  const {
-    createHost,
-    joinPeer,
-    approvePeer,
-    waitForEditor,
-    getShareUrl,
-    promotePeer,
-    openChatPanel,
-    sendChatMessage,
-    getChatMessages,
-    cleanup,
-  } = createE2EHelpers(browser);
+const CYCLES = 5;
 
-  // ── 1. Host A creates room ──
-  const host = await createHost('host@e2e.test');
-  const hostPage = host.page;
+test('5-cycle create/join/leave — no listener leak accumulation', async ({ browser }) => {
+  test.setTimeout(180_000); // 3 minutes for 5 full cycles
 
-  // ── 2. Peer B joins via invite URL ──
-  const shareUrl = await getShareUrl(hostPage);
-  const peer = await joinPeer(shareUrl, 'peer@e2e.test');
-  const peerPage = peer.page;
+  const listenerSamples: Array<{ cycle: number; host: number; peer: number }> = [];
 
-  // ── 3. Host approves Peer B ──
-  await approvePeer(hostPage, 'peer@e2e.test');
+  for (let cycle = 1; cycle <= CYCLES; cycle++) {
+    const helpers = createE2EHelpers(browser);
+    const {
+      createHost,
+      joinPeer,
+      approvePeer,
+      getShareUrl,
+      waitForEditor,
+      openChatPanel,
+      sendChatMessage,
+      getChatMessages,
+      cleanup,
+    } = helpers;
 
-  // ── 4. Wait for peer's editor to become visible ──
-  await waitForEditor(peerPage);
+    // ── 1. Host creates room, peer joins ──
+    const host = await createHost(`host-cycle${cycle}@e2e.test`);
+    const shareUrl = await getShareUrl(host.page);
+    const peer = await joinPeer(shareUrl, `peer-cycle${cycle}@e2e.test`);
 
-  // ── 5. Verify chat works ──
-  await openChatPanel(hostPage);
-  await sendChatMessage(hostPage, 'hello from host');
-  const hostChat = await getChatMessages(hostPage);
-  test.expect(hostChat.some((m) => m.includes('hello from host'))).toBeTruthy();
+    // ── 2. Host approves, wait for connection ──
+    await approvePeer(host.page, `peer-cycle${cycle}@e2e.test`);
+    await waitForEditor(peer.page);
 
-  await openChatPanel(peerPage);
-  // The peer should see the host's message (or at least have chat functional)
-  const peerChat = await getChatMessages(peerPage);
-  test.expect(peerChat.length).toBeGreaterThanOrEqual(0);
+    // ── 3. Verify chat works ──
+    await openChatPanel(host.page);
+    await sendChatMessage(host.page, `cycle-${cycle}: host message`);
+    await openChatPanel(peer.page);
+    const peerMsgs = await getChatMessages(peer.page);
+    expect(peerMsgs.some((m) => m.includes(`cycle-${cycle}: host message`))).toBeTruthy();
 
-  // ── 6. Diagnostic: check listener counts if __P2P_TEST__ is available ──
-  const hostListenerCount = await hostPage.evaluate(
-    () => (window as any).__P2P_TEST__?.getSignalingListenerCount?.() ?? -1,
-  );
+    await sendChatMessage(peer.page, `cycle-${cycle}: peer message`);
+    const hostMsgs = await getChatMessages(host.page);
+    expect(hostMsgs.some((m) => m.includes(`cycle-${cycle}: peer message`))).toBeTruthy();
 
-  if (hostListenerCount !== -1) {
-    // __P2P_TEST__ API is available — assert reasonable listener count
-    test.expect(hostListenerCount).toBeGreaterThanOrEqual(0);
-
-    const peerListenerCount = await peerPage.evaluate(
+    // ── 4. Collect signaling listener counts ──
+    const hostListeners = await host.page.evaluate(
       () => (window as any).__P2P_TEST__?.getSignalingListenerCount?.() ?? -1,
     );
-    test.expect(peerListenerCount).toBeGreaterThanOrEqual(0);
+    const peerListeners = await peer.page.evaluate(
+      () => (window as any).__P2P_TEST__?.getSignalingListenerCount?.() ?? -1,
+    );
+
+    listenerSamples.push({ cycle, host: hostListeners, peer: peerListeners });
+
+    // ── 5. Close both contexts (simulates leave) ──
+    await cleanup();
   }
-  // If __P2P_TEST__ is unavailable, listenerCount will be -1 and we skip assertions.
 
-  // ── 7. Promote Peer B → Host A becomes a peer ──
-  await promotePeer(hostPage, 'peer@e2e.test');
+  // ── Post-cycle assertions ──
 
-  // Verify former host is now a peer
-  const role = await hostPage.evaluate(() =>
-    (window as any).__P2P_TEST__?.getRole(),
-  );
-  test.expect(role).toBe('peer');
+  // Every cycle must have succeeded (listener counts >= 0, connection established)
+  for (const sample of listenerSamples) {
+    expect(sample.host, `cycle ${sample.cycle} host listener count should be >= 0`).toBeGreaterThanOrEqual(0);
+    expect(sample.peer, `cycle ${sample.cycle} peer listener count should be >= 0`).toBeGreaterThanOrEqual(0);
+  }
 
-  // ── 8. Chat still works after promotion ──
-  await sendChatMessage(hostPage, 'hello after promotion');
-  const postPromoChat = await getChatMessages(hostPage);
-  test.expect(
-    postPromoChat.some((m) => m.includes('hello after promotion')),
-  ).toBeTruthy();
+  // Listener counts must not grow across cycles (no leak accumulation).
+  // The first cycle establishes the baseline; subsequent cycles must not exceed it.
+  const firstCycle = listenerSamples[0];
+  const lastCycle = listenerSamples[listenerSamples.length - 1];
 
-  // ── 9. Cleanup ──
-  await cleanup();
+  // Host listener counts stable
+  expect(
+    lastCycle.host,
+    `Host listener leak detected: cycle 1=${firstCycle.host}, cycle ${CYCLES}=${lastCycle.host}`,
+  ).toBeLessThanOrEqual(firstCycle.host + 2); // small margin for timing variance
+
+  // Peer listener counts stable
+  expect(
+    lastCycle.peer,
+    `Peer listener leak detected: cycle 1=${firstCycle.peer}, cycle ${CYCLES}=${lastCycle.peer}`,
+  ).toBeLessThanOrEqual(firstCycle.peer + 2);
+
+  // No runaway growth in any cycle
+  for (let i = 1; i < listenerSamples.length; i++) {
+    const prev = listenerSamples[i - 1];
+    const curr = listenerSamples[i];
+    // Listener counts should be consistent, not growing
+    expect(
+      curr.host,
+      `Host listener growth cycle ${i - 1}→${i}: ${prev.host}→${curr.host}`,
+    ).toBeLessThanOrEqual(prev.host + 3);
+    expect(
+      curr.peer,
+      `Peer listener growth cycle ${i - 1}→${i}: ${prev.peer}→${curr.peer}`,
+    ).toBeLessThanOrEqual(prev.peer + 3);
+  }
+
+  console.log(`[lifecycle-leak] Listener samples across ${CYCLES} cycles:`, listenerSamples);
 });
