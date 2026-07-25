@@ -27,7 +27,7 @@
     "url": "https://github.com/joverval/p2p-collab-files"
   },
   "dependencies": {
-    "@joverval/p2p-collab": "github:joverval/p2p-collab#bd7f1f2b7802ed6cc3921f55b75a893df94f79cf",
+    "@joverval/p2p-collab": "github:joverval/p2p-collab#v0.2.0",
     "@codemirror/lang-markdown": "^6.5.1",
     "@codemirror/language": "^6.12.4",
     "@codemirror/view": "^6.43.6",
