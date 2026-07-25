@@ -322,7 +322,7 @@ describe('Relay Authorization', () => {
       await new Promise<void>((r, rj) => { impostor.on('open', r); impostor.on('error', rj); });
 
       // Impostor sends become-host with the original offer token (still valid in tokenRoom)
-      impostor.send(JSON.stringify({ type: 'become-host', oldToken: offerToken, hostEmail: 'impostor@test.com', requestId: 'become-1' }));
+      impostor.send(JSON.stringify({ type: 'become-host', oldToken: peerToken, hostEmail: 'impostor@test.com', requestId: 'become-1' }));
       const imposterRes = await new Promise<any>((r, rj) => { const t = setTimeout(() => rj(new Error('timeout')), 2000); impostor.once('message', d => { clearTimeout(t); r(JSON.parse(d.toString())); }); });
 
       expect(imposterRes.type).toBe('error');

@@ -45,6 +45,17 @@ function submitAnswer(ws: WebSocket, token: string, email = 'peer@test.com'): Pr
   });
 }
 
+// Helper: store-offer-next — get a fresh offer token within an existing room
+function storeOfferNext(ws: WebSocket, roomId: string, offerId?: string): Promise<any> {
+  return wsRequest(ws, {
+    type: 'store-offer-next',
+    roomId,
+    sdp: 'v=0\\r\\no=- 1 2 IN IP4 127.0.0.1',
+    offerId: offerId || `next-${Math.random().toString(36).slice(2, 8)}`,
+    requestId: `nextreq-${Math.random().toString(36).slice(2, 8)}`,
+  });
+}
+
 describe('Rate Limiting', () => {
   let relay: ReturnType<typeof createRelayServer>;
   let port: number;
@@ -152,20 +163,28 @@ describe('Rate Limiting', () => {
       const host = await wsOpen(`ws://localhost:${port}/ws`);
       const storeRes = await storeOffer(host);
       expect(storeRes.type).toBe('token');
-      const token = storeRes.token;
+      const roomId = storeRes.roomId;
+      const token1 = storeRes.token;
 
-      // First two peers: allowed
+      // First peer: allowed (uses initial offer token)
       const peer1 = await wsOpen(`ws://localhost:${port}/ws`);
-      const r1 = await submitAnswer(peer1, token, 'peer1@test.com');
+      const r1 = await submitAnswer(peer1, token1, 'peer1@test.com');
       expect(r1.type).toBe('waiting-approval');
 
+      // Second peer: uses fresh token from store-offer-next
+      const nextRes = await storeOfferNext(host, roomId);
+      expect(nextRes.type).toBe('token');
+      const token2 = nextRes.token;
       const peer2 = await wsOpen(`ws://localhost:${port}/ws`);
-      const r2 = await submitAnswer(peer2, token, 'peer2@test.com');
+      const r2 = await submitAnswer(peer2, token2, 'peer2@test.com');
       expect(r2.type).toBe('waiting-approval');
 
-      // Third peer: rejected
+      // Third peer: rejected (room full)
+      const nextRes2 = await storeOfferNext(host, roomId);
+      expect(nextRes2.type).toBe('token');
+      const token3 = nextRes2.token;
       const peer3 = await wsOpen(`ws://localhost:${port}/ws`);
-      const r3 = await submitAnswer(peer3, token, 'peer3@test.com');
+      const r3 = await submitAnswer(peer3, token3, 'peer3@test.com');
       expect(r3.type).toBe('error');
       expect(r3.code).toBe('RATE_LIMITED');
       expect(r3.message).toContain('full');
@@ -177,23 +196,30 @@ describe('Rate Limiting', () => {
       const host = await wsOpen(`ws://localhost:${port}/ws`);
       const storeRes = await storeOffer(host);
       expect(storeRes.type).toBe('token');
-      const token = storeRes.token;
+      const roomId = storeRes.roomId;
+      const token1 = storeRes.token;
 
-      // Two peers connect
+      // Two peers connect, each with their own token
       const peer1 = await wsOpen(`ws://localhost:${port}/ws`);
-      await submitAnswer(peer1, token, 'peer1@test.com');
+      await submitAnswer(peer1, token1, 'peer1@test.com');
 
+      const nextRes = await storeOfferNext(host, roomId);
+      expect(nextRes.type).toBe('token');
+      const token2 = nextRes.token;
       const peer2 = await wsOpen(`ws://localhost:${port}/ws`);
-      await submitAnswer(peer2, token, 'peer2@test.com');
+      await submitAnswer(peer2, token2, 'peer2@test.com');
 
       // Peer1 disconnects — should free up a slot
       peer1.close();
       // Give server a moment to process close
       await new Promise(r => setTimeout(r, 100));
 
-      // New peer should now be accepted
+      // New peer with fresh token should now be accepted
+      const nextRes2 = await storeOfferNext(host, roomId);
+      expect(nextRes2.type).toBe('token');
+      const token3 = nextRes2.token;
       const peer3 = await wsOpen(`ws://localhost:${port}/ws`);
-      const r3 = await submitAnswer(peer3, token, 'peer3@test.com');
+      const r3 = await submitAnswer(peer3, token3, 'peer3@test.com');
       expect(r3.type).toBe('waiting-approval');
 
       host.close(); peer2.close(); peer3.close();

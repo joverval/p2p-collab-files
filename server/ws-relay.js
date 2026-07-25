@@ -493,7 +493,7 @@ export function createRelayServer(options = {}) {
             return;
           }
           const offerToken = genToken();
-          room.offers.set(offerToken, { sdp: msg.sdp, offerId: msg.offerId });
+          room.offers.set(offerToken, { sdp: msg.sdp, offerId: msg.offerId, status: 'available', claimedByParticipantId: null, claimedAt: null, approvedAt: null });
           tokenRoom.set(offerToken, { roomId: room.roomId, role: 'host', createdAt: clock(), participantId: room.hostParticipantId });
           const hostToken = 'host:' + genToken();
           room.participants.set(hostToken, { ws, email: normalizedEmail, participantId: room.hostParticipantId, role: 'host' });
@@ -512,6 +512,17 @@ export function createRelayServer(options = {}) {
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
           const offer = room.offers.get(msg.token);
           if (!offer) { respond(ws, { type: 'error', message: 'Offer not found' }, requestId); return; }
+          // Reject replay of claimed / approved / expired tokens
+          if (offer.status !== 'available') {
+            // Narrow idempotent retry: same pending participant on same WS
+            const claimedByPending = offer.status === 'claimed' && [...room.participants.values()].some(
+              p => p._offerToken === msg.token && p.pendingRequestWs === ws
+            );
+            if (!claimedByPending) {
+              respond(ws, { type: 'error', code: 'OFFER_ALREADY_CLAIMED', message: 'Offer token already used' }, requestId);
+              return;
+            }
+          }
           room.lastActivityAt = clock();
           respond(ws, { type: 'offer', sdp: offer.sdp, offerId: offer.offerId, roomId: room.roomId }, requestId);
           break;
@@ -525,6 +536,14 @@ export function createRelayServer(options = {}) {
           if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
           const room = rooms.get(info.roomId);
           if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+
+          // Atomically claim the offer before creating participant
+          const offer = room.offers.get(msg.token);
+          if (!offer) { respond(ws, { type: 'error', message: 'Offer not found' }, requestId); return; }
+          if (offer.status !== 'available') {
+            respond(ws, { type: 'error', code: 'OFFER_ALREADY_CLAIMED', message: 'Offer token already used' }, requestId);
+            return;
+          }
 
           // Peer limit per room
           if (ipTracker.peerCount(info.roomId) >= maxPeersPerRoom) {
@@ -541,6 +560,12 @@ export function createRelayServer(options = {}) {
           // Look up existing member to preserve participantId on reconnect
           const existingMember = room.members.get(normalizedEmail);
           const peerPid = existingMember ? existingMember.participantId : genToken();
+
+          // Claim the offer atomically
+          offer.status = 'claimed';
+          offer.claimedByParticipantId = peerPid;
+          offer.claimedAt = clock();
+
           const peerToken = genToken();
           room.participants.set(peerToken, {
             ws,
@@ -549,6 +574,7 @@ export function createRelayServer(options = {}) {
             role: 'peer',
             pendingRequestWs: ws,
             _pendingSince: clock(),
+            _offerToken: msg.token,
           });
           tokenRoom.set(peerToken, { roomId: info.roomId, role: 'peer', createdAt: clock(), participantId: peerPid });
 
@@ -591,6 +617,11 @@ export function createRelayServer(options = {}) {
           const participant = room.participants.get(msg.token);
           if (participant && participant.pendingRequestWs && participant.pendingRequestWs.readyState === 1) {
             respond(participant.pendingRequestWs, { type: 'approved' }, requestId);
+            // Consume invite token after approval
+            if (participant._offerToken) {
+              room.offers.delete(participant._offerToken);
+              tokenRoom.delete(participant._offerToken);
+            }
           }
           if (participant) participant.pendingRequestWs = undefined;
           room.lastActivityAt = clock();
@@ -615,6 +646,11 @@ export function createRelayServer(options = {}) {
             }
             room.participants.delete(msg.token);
             tokenRoom.delete(msg.token);
+            // Consume invite token after rejection
+            if (participant._offerToken) {
+              room.offers.delete(participant._offerToken);
+              tokenRoom.delete(participant._offerToken);
+            }
           }
           room.lastActivityAt = clock();
           respond(ws, { type: 'host-reject-ack' }, requestId);
@@ -701,7 +737,7 @@ export function createRelayServer(options = {}) {
           }
 
           const nextToken = genToken();
-          room.offers.set(nextToken, { sdp: msg.sdp, offerId: msg.offerId });
+          room.offers.set(nextToken, { sdp: msg.sdp, offerId: msg.offerId, status: 'available', claimedByParticipantId: null, claimedAt: null, approvedAt: null });
           tokenRoom.set(nextToken, { roomId: room.roomId, role: 'host', createdAt: clock() });
           room.lastActivityAt = clock();
           respond(ws, { type: 'token', token: nextToken, offerId: msg.offerId, roomId: room.roomId }, requestId);
@@ -800,6 +836,10 @@ export function createRelayServer(options = {}) {
             sdp: msg.sdp,
             offerId: msg.offerId,
             intendedEmail: msg.intendedEmail,
+            status: 'available',
+            claimedByParticipantId: null,
+            claimedAt: null,
+            approvedAt: null,
           });
           tokenRoom.set(token, { roomId: room.roomId, role: 'peer', createdAt: clock() });
 
@@ -939,6 +979,8 @@ export function createRelayServer(options = {}) {
         const room = rooms.get(info.roomId);
         if (room) {
           // Clean stale offer without deleting room
+          const offer = room.offers.get(tk);
+          if (offer) offer.status = 'expired';
           room.offers.delete(tk);
           const participant = room.participants.get(tk);
           if (participant && ![...tokenRoom.values()].some(v => {

@@ -34,6 +34,7 @@ export class SessionController {
   private _baseUrl: string;
   private _peerEmails = new Map<string, string>();
   private promotionInProgress = false;
+  private _rotateInProgress = false;
   private _connectionState: ConnectionState = 'idle';
   private _permanentHandlersRegistered = false;
   private _isHost = false;
@@ -89,6 +90,7 @@ export class SessionController {
   onChatMessage?: (sender: string, text: string, senderRole?: string) => void;
   onRoomState?: (snapshot: RoomSnapshot) => void;
   onRoleChanged?: (isHost: boolean, hostEmail: string) => void;
+  onInviteChanged?: (token: string, shareUrl: string) => void;
   getEmail?: () => string;
   setConnected?: (v: boolean) => void;
 
@@ -191,9 +193,24 @@ export class SessionController {
         this.onPeerLeave?.(pe);
       },
       onPeerConnect: (_peerId: string) => {
+        console.log('[DEBUG] onPeerConnect fired, peerId:', _peerId);
+        // ponytail: visible debug — set page title to confirm this callback fires
+        document.title = '[DEBUG] onPeerConnect: ' + _peerId;
         this._connectionState = 'connected';
         this.setConnected?.(true);
         this.publishRoomSnapshot();
+        // ponytail: host route label, mirroring peer-side onConnect pattern
+        console.log('[DEBUG] calling getConnectionRoute with peerId:', _peerId);
+        r.getConnectionRoute(_peerId).then(route => {
+          console.log('[DEBUG] getConnectionRoute resolved:', JSON.stringify(route));
+          const label = route.kind === 'turn' ? 'TURN relay' : route.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
+          console.log('[DEBUG] calling onConnected with label:', label);
+          document.title = '[DEBUG] onConnected: ' + label;
+          this.onConnected?.(label);
+        }).catch(err => {
+          console.error('[DEBUG] getConnectionRoute failed:', err);
+          document.title = '[DEBUG] getConnectionRoute ERROR: ' + err;
+        });
       },
     });
     const { url, offerId } = await r.offerUrl();
@@ -275,14 +292,7 @@ export class SessionController {
       this.publishRoomSnapshot();
       this.onPeerJoin?.(peerId, pe);
       if (useRelay) {
-        try {
-          const { url: nu, offerId: noi } = await r.offerUrl();
-          this._currentOfferId = noi;
-          const nuSdpB64 = nu.match(/#sdp=(.*)/)?.[1] || '';
-          const resp = await this.signaling.request({ type: 'store-offer-next', roomId: this._roomId, sdp: nuSdpB64, offerId: noi });
-          this._token = resp.token as string;
-          this._shareUrl = `${this._baseUrl}#${this._token}`;
-        } catch (err: any) { this.onLog?.('system', `ERROR: ${err.message}`); }
+        this.rotateInvite().catch(err => this.onLog?.('system', `ERROR: ${err.message}`));
       }
     });
 
@@ -310,6 +320,46 @@ export class SessionController {
 
   // ── Host: reject ──
   rejectPeer(token: string) { this.signaling.send({ type: 'host-reject', token }); this.publishRoomSnapshot(); }
+
+  // ── Host: rotate invite token (relay or manual) ──
+  /** Generate a new offer, update the share URL, and fire onInviteChanged.
+   *  Idempotent: skips if a rotation is already in progress.
+   *  Returns true if a new invite was generated, false if skipped. */
+  async rotateInvite(): Promise<boolean> {
+    if (!this.room || !this._isHost) return false;
+    if (this._rotateInProgress) return false;
+    this._rotateInProgress = true;
+    try {
+      const { url: nu, offerId: noi } = await this.room.offerUrl();
+      this._currentOfferId = noi;
+      const nuSdpB64 = nu.match(/#sdp=(.*)/)?.[1] || '';
+      this._shareUrl = '';
+      this._token = '';
+      if (this.signaling && this._roomId) {
+        // ponytail: only store-offer-next when relay is active (has roomId)
+        const resp = await this.signaling.request({
+          type: 'store-offer-next',
+          roomId: this._roomId,
+          sdp: nuSdpB64,
+          offerId: noi,
+        });
+        this._token = resp.token as string;
+        this._shareUrl = `${this._baseUrl}#${this._token}`;
+        this.onInviteChanged?.(this._token, this._shareUrl);
+      } else {
+        // Manual mode: no relay, use URL fragment directly
+        this._shareUrl = `${this._baseUrl}#offer=${noi}&sdp=${encodeURIComponent(nuSdpB64)}`;
+        this._token = `${noi}:${nuSdpB64}`;
+        this.onInviteChanged?.(this._token, this._shareUrl);
+      }
+      return true;
+    } catch (err: any) {
+      this.onLog?.('system', `ERROR: rotateInvite failed: ${err.message}`);
+      return false;
+    } finally {
+      this._rotateInProgress = false;
+    }
+  }
 
   // ── Host (manual mode): accept answer URL with explicit offerId ──
   manualAcceptAnswer(offerId: string, signalUrl: string): void {

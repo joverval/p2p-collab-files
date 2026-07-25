@@ -15,6 +15,7 @@ export class SignalingClient implements IceConfigProvider {
   private handlers = new Map<string, Set<(msg: IncomingSignalMessage) => void>>();
   private _iceConfig: RTCConfiguration | null = null;
   private _iceConfigExpiry = 0; // epoch ms when credentials expire
+  private _iceConfigSource: 'relay' | 'fallback' | null = null;
   private wsFactory: WsFactory;
 
   constructor(wsFactory: WsFactory = DEFAULT_WS_FACTORY) {
@@ -105,6 +106,7 @@ export class SignalingClient implements IceConfigProvider {
         iceTransportPolicy: (data.iceTransportPolicy as RTCIceTransportPolicy) || 'all',
       };
       this._iceConfig = this.applyIceMode(config);
+      this._iceConfigSource = 'relay';
       // Track TTL from API response (default 3600s) to support refreshIfNeeded
       const ttlSeconds = data.ttl ?? 3600;
       this._iceConfigExpiry = Date.now() + ttlSeconds * 1000;
@@ -119,7 +121,8 @@ export class SignalingClient implements IceConfigProvider {
         iceTransportPolicy: 'all',
       };
       this._iceConfig = this.applyIceMode(config);
-      this._iceConfigExpiry = Infinity; // STUN-only never expires
+      this._iceConfigSource = 'fallback';
+      this._iceConfigExpiry = Date.now() + 5 * 60 * 1000; // finite: retry relay after 5 min
     }
     return this._iceConfig;
   }
@@ -140,6 +143,22 @@ export class SignalingClient implements IceConfigProvider {
   }
 
   get iceConfig(): RTCConfiguration | null { return this._iceConfig; }
+
+  /** Where the current ICE config came from: relay API or STUN fallback. */
+  get iceConfigSource(): 'relay' | 'fallback' | null { return this._iceConfigSource; }
+
+  /** Whether the cached ICE config includes at least one TURN server with credentials. */
+  get hasTurn(): boolean {
+    if (!this._iceConfig) return false;
+    const servers = this._iceConfig.iceServers ?? [];
+    for (const s of servers) {
+      if (!s?.urls) continue;
+      const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+      const isTurn = urls.some(u => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:')));
+      if (isTurn && s.username && (s as any).credential) return true;
+    }
+    return false;
+  }
 
   /** Count of active event subscribers (for test diagnostics). */
   get listenerCount(): number {

@@ -7,6 +7,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['tests/vitest.setup.ts'],
+    // Integration tests use dynamic ports — can run in parallel
+    pool: 'forks',
+    // Vitest 4: poolOptions are now top-level options
+    singleFork: false,
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],

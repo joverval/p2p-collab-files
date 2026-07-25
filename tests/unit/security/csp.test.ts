@@ -86,8 +86,9 @@ describe('Content Security Policy', () => {
   it('connect-src allows WebSocket to relay', () => {
     const connectSrc = directives.get('connect-src') || '';
     expect(connectSrc).toContain('wss://relay.joverval.cl');
-    // Also allow local WS for development
-    expect(connectSrc).toContain('ws://localhost:8083');
+    // Allow any localhost WS port for dev/testing (dynamic port allocation)
+    expect(connectSrc).toContain('ws://localhost:*');
+    expect(connectSrc).toContain('http://localhost:*');
   });
 
   it('connect-src allows HTTPS fetch to relay for TURN credentials', () => {

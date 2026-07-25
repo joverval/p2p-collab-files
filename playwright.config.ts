@@ -2,6 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'tests/e2e',
+  globalSetup: 'tests/e2e/global.setup.ts',
+  globalTeardown: 'tests/e2e/global.setup.ts',
   timeout: 60000,
   expect: { timeout: 10000 },
   fullyParallel: false,
@@ -26,7 +28,8 @@ export default defineConfig({
   ],
   webServer: [
     {
-      command: `VITE_P2P_TEST_API=true VITE_SIGNAL_WS_URL=ws://localhost:8083/ws VITE_SIGNAL_HTTP_URL=http://localhost:8083 VITE_ICE_MODE=${process.env.VITE_ICE_MODE || 'all'} npx vite --port 8082`,
+      // RELAY_URL, VITE_SIGNAL_WS_URL, VITE_SIGNAL_HTTP_URL set by globalSetup (dynamic port)
+      command: `VITE_P2P_TEST_API=true VITE_ICE_MODE=${process.env.VITE_ICE_MODE || 'all'} npx vite --port 8082`,
       port: 8082,
       reuseExistingServer: !process.env.CI,
     },

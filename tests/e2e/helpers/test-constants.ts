@@ -8,7 +8,9 @@
 /** Base URL for the app under test (matches playwright.config.ts baseURL). */
 export const BASE_URL = process.env.BASE_URL || 'http://localhost:8082';
 
-/** Relay WebSocket URL (matches playwright.config.ts webServer port 8083). */
+/** Relay WebSocket URL. Reads RELAY_URL env var set by playwright globalSetup.
+ *  Each test run gets a unique dynamic port — never hardcode here.
+ *  Fallback exists for manual `npm run relay` on port 8083 during local dev only. */
 export const RELAY_URL = process.env.RELAY_URL || 'ws://localhost:8083/ws';
 
 /** TURN server credentials for E2E tests that use coturn. */
