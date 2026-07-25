@@ -34,10 +34,7 @@ jobs:
           npx tsc --emitDeclarationOnly
 
       - name: Install dependencies
-        run: |
-          # Pin library dependency to exact commit for CI reproducibility
-          sed -i 's|"file:../p2p-collab"|"github:joverval/p2p-collab#bd7f1f2b7802ed6cc3921f55b75a893df94f79cf"|' package.json
-          npm ci
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
