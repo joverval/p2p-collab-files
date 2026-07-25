@@ -113,7 +113,6 @@ export function createApplication() {
     ($('toast-approve') as HTMLButtonElement).onclick = () => {
       session.approvePeer({ email: req.email, token: req.token, offerId: req.offerId, answerB64: req.answerB64 });
       $('toast').style.display = 'none';
-      chat.addLog('system', `✅ Approved ${req.email}`);
     };
     ($('toast-reject') as HTMLButtonElement).onclick = () => {
       session.rejectPeer(req.token);

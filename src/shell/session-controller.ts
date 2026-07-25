@@ -136,7 +136,6 @@ export class SessionController {
       this._connectionState = 'negotiating';
       const newPeer = new P2PRoom(false, this._baseUrl, {
         rtcConfig,
-        trickle: true,
         iceMode: 'all',
         onConnect: () => {
           this._connectionState = 'connected';
@@ -193,7 +192,6 @@ export class SessionController {
     this._connectionState = 'negotiating';
     const r = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
-      trickle: true,
       iceMode: 'all',
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerLeave: (peerId: string) => {
@@ -204,23 +202,14 @@ export class SessionController {
         this.onPeerLeave?.(pe);
       },
       onPeerConnect: (_peerId: string) => {
-        console.log('[DEBUG] onPeerConnect fired, peerId:', _peerId);
-        // ponytail: visible debug — set page title to confirm this callback fires
-        document.title = '[DEBUG] onPeerConnect: ' + _peerId;
         this._connectionState = 'connected';
         this.setConnected?.(true);
         this.publishRoomSnapshot();
-        // ponytail: host route label, mirroring peer-side onConnect pattern
-        console.log('[DEBUG] calling getConnectionRoute with peerId:', _peerId);
         r.getConnectionRoute(_peerId).then(route => {
-          console.log('[DEBUG] getConnectionRoute resolved:', JSON.stringify(route));
-          const label = route.kind === 'turn' ? 'TURN relay' : route.kind === 'direct' ? 'Direct P2P' : 'Direct P2P';
-          console.log('[DEBUG] calling onConnected with label:', label);
-          document.title = '[DEBUG] onConnected: ' + label;
+          const label = route.kind === 'turn' ? 'TURN relay' : 'Direct P2P';
           this.onConnected?.(label);
-        }).catch(err => {
-          console.error('[DEBUG] getConnectionRoute failed:', err);
-          document.title = '[DEBUG] getConnectionRoute ERROR: ' + err;
+        }).catch(() => {
+          this.onConnected?.('Direct P2P');
         });
       },
     });
@@ -411,7 +400,6 @@ export class SessionController {
     this._connectionState = 'negotiating';
     const peer = new P2PRoom(false, this._baseUrl, {
       rtcConfig,
-      trickle: true,
       iceMode: 'all',
       onConnect: () => {
         this._connectionState = 'connected';
@@ -502,7 +490,6 @@ export class SessionController {
     const rtcConfig = await this.signaling.fetchIceConfig();
     this.nextRoom = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
-      trickle: true,
       iceMode: 'all',
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerConnect: (_peerId: string) => {
