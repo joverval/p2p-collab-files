@@ -87,6 +87,13 @@ export function createRelayServer(options = {}) {
     turnConfig: tc = null,
   } = options;
 
+  // ── Metrics counters ──
+  let totalConnections = 0;
+  let totalDisconnections = 0;
+  let totalMessagesRelayed = 0;
+  let httpApiHits = 0;
+  let turnCredentialHits = 0;
+
   // ── TURN config ──
   let TURN_ENABLED = false;
   let TURN_HOST = '';
@@ -320,6 +327,11 @@ export function createRelayServer(options = {}) {
 
   // ── HTTP server ──
   const server = http.createServer((req, res) => {
+    // Only count non-metrics HTTP requests — /metrics and /healthz are internal
+    if (req.url !== '/metrics' && req.url !== '/healthz') {
+      httpApiHits++;
+    }
+
     const origin = req.headers.origin || '';
     if (allowedOrigins.includes(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
@@ -329,6 +341,22 @@ export function createRelayServer(options = {}) {
 
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+    if (req.method === 'GET' && req.url === '/metrics') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        total_connections: totalConnections,
+        total_disconnections: totalDisconnections,
+        total_messages_relayed: totalMessagesRelayed,
+        http_api_hits: httpApiHits,
+        turn_credential_hits: turnCredentialHits,
+        uptime: process.uptime(),
+        version: '2.0',
+        current_connections: wss.clients.size,
+        current_rooms: rooms.size,
+      }));
+      return;
+    }
+
     if (req.method === 'GET' && req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'ok', uptime: process.uptime(), version: '2.0', rooms: rooms.size }));
@@ -336,6 +364,8 @@ export function createRelayServer(options = {}) {
     }
 
     if (req.method === 'GET' && req.url === '/turn-credentials') {
+      turnCredentialHits++;
+
       // Rate limit per IP
       const ip = getRemoteIPFromReq(req);
       const ipKey = `turn:${ip}`;
@@ -440,6 +470,8 @@ export function createRelayServer(options = {}) {
   wss.on('close', () => clearInterval(hbInterval));
 
   wss.on('connection', (ws) => {
+    totalConnections++;
+
     wsMeta.set(ws, { lastPong: clock() });
     ws._pongMisses = 0;
 
@@ -931,6 +963,7 @@ export function createRelayServer(options = {}) {
             if (participant.role === 'host') continue;
             if (participant.ws && participant.ws.readyState === 1) {
               sendJson(participant.ws, { type: 'publish', payload: msg.payload, from: 'host' });
+              totalMessagesRelayed++;
             }
           }
           room.lastActivityAt = clock();
@@ -947,6 +980,8 @@ export function createRelayServer(options = {}) {
     });
 
     ws.on('close', () => {
+      totalDisconnections++;
+
       for (const [roomId, room] of rooms) {
         const wasHost = room.hostWs === ws;
 
