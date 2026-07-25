@@ -273,6 +273,44 @@ button.handshake-btn:hover { background: #444; }
 .dropdown-menu button:disabled { color: var(--text-light); cursor: default; }
 .dropdown-menu button:disabled:hover { background: none; color: var(--text-light); }
 
+/* Info menu dropdown (left-anchored, wider for connection info) */
+#info-dropdown {
+  left: 0;
+  right: auto;
+  min-width: 240px;
+  padding: 8px;
+}
+.info-menu-section {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+.info-menu-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 72px;
+}
+.info-menu-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+}
+.info-menu-divider {
+  border: none;
+  border-top: 1px solid var(--border-subtle);
+  margin: 8px 0;
+}
+#info-dropdown .compact-input {
+  max-width: none;
+  width: 100%;
+  margin: 4px 0;
+}
+
 /* ═══════════════════════════════════════════
    Editor + Preview Split
    ═══════════════════════════════════════════ */

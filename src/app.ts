@@ -24,6 +24,12 @@ export function createApplication() {
   const feature = new MarkdownFeature();
 
   let email = '';
+  let connectionRoute = '';
+
+  function updateInfoMenu() {
+    setTextContent('info-room-id', session.roomId || '--');
+    setTextContent('info-connection-type', connectionRoute || '--');
+  }
   let editorReady = false;
 
   // ── P2P connected state (real WebRTC, not relay-approved) ──
@@ -55,8 +61,6 @@ export function createApplication() {
     // Host-only controls
     ($('open-file-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
     ($('copy-invite-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
-    ($('manual-answer-input') as HTMLInputElement).style.display = host ? '' : 'none';
-    ($('manual-answer-btn') as HTMLButtonElement).style.display = host ? '' : 'none';
 
     // Peer-only controls
     ($('sync-btn') as HTMLButtonElement).style.display = host ? 'none' : '';
@@ -71,6 +75,7 @@ export function createApplication() {
     // Role label in top bar
     setTextContent('topbar-role', host ? '👑 Host' : '👤 Peer');
 
+    updateInfoMenu();
     panel.refresh();
     ensureEditorVisible();
   }
@@ -146,9 +151,11 @@ export function createApplication() {
     // all state updates flow through onRoomState
   };
   session.onConnected = (route) => {
+    connectionRoute = route;
     chat.addLog('system', `📡 Connected — ${route}`);
     setTextContent('connection-route', route);
     setTextContent('connection-state', 'connected');
+    updateInfoMenu();
     feature.onConnected(); // ponytail: trigger peer sync (isHost guard makes it no-op for host)
   };
   session.onRoleChanged = (host, hostEmail) => {
@@ -192,6 +199,18 @@ export function createApplication() {
   });
   document.addEventListener('click', () => ($('file-dropdown') as HTMLElement)?.classList.remove('show'));
 
+  // ── Info dropdown toggle ──
+  ($('info-menu-btn') as HTMLElement)?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    ($('info-dropdown') as HTMLElement)?.classList.toggle('show');
+  });
+  document.addEventListener('click', () => ($('info-dropdown') as HTMLElement)?.classList.remove('show'));
+
+  // ── Manual answer button (always visible in info menu) ──
+  ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
+    session.manualAcceptAnswer(session.currentOfferId, ($('manual-answer-input') as HTMLInputElement).value.trim());
+  };
+
   // Sync
   ($('sync-btn') as HTMLButtonElement)?.addEventListener('click', () => session.sendControl('[SYNC]'));
 
@@ -224,7 +243,7 @@ export function createApplication() {
     isHost = true;
     ($('email-input') as HTMLInputElement).disabled = true;
 
-    const useRelay = await session.createRoom(email);
+    await session.createRoom(email);
     applyRoleState(true, email);
     ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
     ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
@@ -241,13 +260,6 @@ export function createApplication() {
 
     ensureEditorVisible();
 
-    if (!useRelay) {
-      ($('manual-answer-input') as HTMLInputElement).style.display = '';
-      ($('manual-answer-btn') as HTMLButtonElement).style.display = '';
-      ($('manual-answer-btn') as HTMLButtonElement).onclick = () => {
-        session.manualAcceptAnswer(session.currentOfferId, ($('manual-answer-input') as HTMLInputElement).value.trim());
-      };
-    }
   });
 
   // ── Join Room ──

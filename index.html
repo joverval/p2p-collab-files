@@ -36,8 +36,25 @@
     <span id="topbar-role" data-testid="role-label" style="font-size:12px;color:#8b949e;margin-left:4px;"></span>
     <button id="copy-invite-btn" data-testid="copy-invite-btn" class="handshake-btn" style="display:none;">📋 Copy invite</button>
     <span id="invite-copied" style="display:none;color:#3fb950;font-size:12px;">Copied!</span>
-    <input id="manual-answer-input" data-testid="answer-input" class="compact-input" placeholder="Paste answer..." style="display:none;">
-    <button id="manual-answer-btn" data-testid="apply-answer-btn" style="display:none;">Apply</button>
+    <div class="dropdown">
+      <button class="icon-btn" id="info-menu-btn" title="Connection info">ℹ️</button>
+      <div class="dropdown-menu" id="info-dropdown">
+        <div class="info-menu-section">
+          <span class="info-menu-label">Room</span>
+          <span id="info-room-id" class="info-menu-value">--</span>
+        </div>
+        <div class="info-menu-section">
+          <span class="info-menu-label">Connection</span>
+          <span id="info-connection-type" class="info-menu-value">--</span>
+        </div>
+        <hr class="info-menu-divider">
+        <div class="info-menu-section" style="flex-direction:column;align-items:stretch;gap:6px;">
+          <span class="info-menu-label">Manual connection</span>
+          <input id="manual-answer-input" data-testid="answer-input" class="compact-input" placeholder="Paste answer...">
+          <button id="manual-answer-btn" data-testid="apply-answer-btn">Apply</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- CENTER: spacer -->
