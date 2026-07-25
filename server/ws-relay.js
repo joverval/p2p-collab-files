@@ -115,6 +115,26 @@ export function createRelayServer(options = {}) {
 
   if (TURN_ENABLED) {
     logger.info(`TURN enabled: ${TURN_HOST}:${TURN_PORT} (HMAC-SHA1, ${TURN_TTL}s TTL, credentials rotate on relay restart)`);
+
+    // ponytail: auto-refresh TURN_HOST every 5 min for dynamic IPs
+    // Uses stdlib http.get — no fetch dependency
+    import('node:http').then(({ get }) => {
+      function refreshTurnHost() {
+        get('http://ifconfig.me/ip', { timeout: 5000 }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            const ip = data.trim();
+            if (ip && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip) && ip !== TURN_HOST) {
+              logger.info(`TURN_HOST changed: ${TURN_HOST} → ${ip}`);
+              TURN_HOST = ip;
+            }
+          });
+        }).on('error', () => { /* ifconfig.me down, keep old IP */ });
+      }
+      refreshTurnHost();
+      setInterval(refreshTurnHost, 5 * 60 * 1000);
+    });
   } else {
     logger.info('TURN disabled — set TURN_ENABLED=1 and TURN_SECRET to enable');
   }
