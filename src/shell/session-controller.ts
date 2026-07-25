@@ -46,6 +46,14 @@ export class SessionController {
   private _localParticipantId = '';
   private _hostParticipantId = '';
 
+  /** Log ICE diagnostic info, gracefully handling mocks / older Room impls. */
+  private _logIceConfig(room: Room): void {
+    try {
+      const d = room.getIceConfigurationSummary();
+      this.onLog?.('system', `🧊 ICE: mode=${d.mode} stun=${d.stunCount} turn=${d.turnCount} credentials=${d.hasTurnCredentials} policy=${d.transportPolicy}`);
+    } catch { /* diagnostic-only — never fail on logging */ }
+  }
+
   // ── Participant tracking (SessionController owns the canonical list) ──
 
   addParticipant(p: Participant): void {
@@ -129,6 +137,7 @@ export class SessionController {
       const newPeer = new P2PRoom(false, this._baseUrl, {
         rtcConfig,
         trickle: true,
+        iceMode: 'all',
         onConnect: () => {
           this._connectionState = 'connected';
           this.setConnected?.(true);
@@ -147,6 +156,7 @@ export class SessionController {
       const offerData = await this.signaling.request({ type: 'fetch-offer', token: m.token });
       const aUrl = await newPeer.connectToHost(`${this._baseUrl}#sdp=${offerData.sdp as string}`);
       this.room = newPeer;
+      this._logIceConfig(newPeer);
       const ab64 = aUrl.match(/#sdp=(.*)/)?.[1] || '';
       this.signaling.send({ type: 'submit-answer', token: m.token, email: this.getEmail?.() ?? '', answerB64: ab64 });
     });
@@ -184,6 +194,7 @@ export class SessionController {
     const r = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
       trickle: true,
+      iceMode: 'all',
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerLeave: (peerId: string) => {
         const pe = this._peerEmails.get(peerId) || peerId;
@@ -215,6 +226,7 @@ export class SessionController {
     });
     const { url, offerId } = await r.offerUrl();
     this._currentOfferId = offerId; this.room = r;
+    this._logIceConfig(r);
     const sdpB64 = url.match(/#sdp=(.*)/)?.[1] || '';
 
     if (useRelay) {
@@ -225,12 +237,12 @@ export class SessionController {
       this._shareUrl = `${this._baseUrl}#offer=${offerId}&sdp=${encodeURIComponent(sdpB64)}`;
     }
 
-    this.setupRoomHandlers(r, useRelay);
+    this.setupRoomHandlers(r);
     this.publishRoomSnapshot();
     return useRelay;
   }
 
-  private setupRoomHandlers(r: Room, useRelay: boolean) {
+  private setupRoomHandlers(r: Room) {
     r.onMessage((data, peerId) => {
       if (!(data instanceof Uint8Array)) return;
       const d = decodeMessage(data);
@@ -291,9 +303,6 @@ export class SessionController {
       }
       this.publishRoomSnapshot();
       this.onPeerJoin?.(peerId, pe);
-      if (useRelay) {
-        this.rotateInvite().catch(err => this.onLog?.('system', `ERROR: ${err.message}`));
-      }
     });
 
   }
@@ -316,6 +325,8 @@ export class SessionController {
     // 3. Only after acceptAnswer succeeds, send host-approve via signaling
     this.signaling.send({ type: 'host-approve', token: request.token });
     this.onLog?.('system', `✅ Approved ${request.email}`);
+    // ponytail: rotate after token consumption, not ICE connect
+    this.rotateInvite().catch(err => this.onLog?.('system', `ERROR: rotate failed: ${err.message}`));
   }
 
   // ── Host: reject ──
@@ -366,6 +377,8 @@ export class SessionController {
     const m = signalUrl.match(/#sdp=(.*)/);
     const b64 = m ? decodeURIComponent(m[1]) : signalUrl;
     this.room?.acceptAnswer(offerId, `#sdp=${b64}`);
+    // ponytail: rotate after manual answer consumption
+    this.rotateInvite().catch(err => this.onLog?.('system', `ERROR: rotate failed: ${err.message}`));
   }
 
   // ── Peer: parse URL ──
@@ -399,6 +412,7 @@ export class SessionController {
     const peer = new P2PRoom(false, this._baseUrl, {
       rtcConfig,
       trickle: true,
+      iceMode: 'all',
       onConnect: () => {
         this._connectionState = 'connected';
         this.setConnected?.(true);
@@ -413,6 +427,7 @@ export class SessionController {
     });
     const answerUrl = await peer.connectToHost(`${this._baseUrl}#sdp=${offerB64}`);
     this.room = peer;
+    this._logIceConfig(peer);
     const answerB64 = answerUrl.match(/#sdp=(.*)/)?.[1] || '';
 
     if (useRelay) {
@@ -488,6 +503,7 @@ export class SessionController {
     this.nextRoom = new P2PRoom(true, this._baseUrl, {
       rtcConfig,
       trickle: true,
+      iceMode: 'all',
       onError: (e: Error) => this.onLog?.('system', `ERROR: ${e.message}`),
       onPeerConnect: (_peerId: string) => {
         this._connectionState = 'connected';
@@ -495,6 +511,7 @@ export class SessionController {
         this.publishRoomSnapshot();
       },
     });
+    this._logIceConfig(this.nextRoom);
 
     // Create reconnect offers for ALL participants (including previous host)
     const reconnectTokens: Record<string, string> = {};
@@ -541,7 +558,7 @@ export class SessionController {
       }
 
       this._lastRoomStateVersion = 0; // reset for new host's version counter
-      this.setupRoomHandlers(this.room!, true);
+      this.setupRoomHandlers(this.room!);
       // Close old peer connection AFTER new host room is ready
       oldRoom?.close();
       this.publishRoomSnapshot();

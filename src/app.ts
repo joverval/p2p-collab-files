@@ -208,6 +208,12 @@ export function createApplication() {
     ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
       navigator.clipboard.writeText(session.shareUrl).then(() => { ($('invite-copied') as HTMLElement).style.display = 'inline'; setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000); });
     };
+    // ponytail: update copy target on every invite rotation
+    session.onInviteChanged = (_token, url) => {
+      ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
+        navigator.clipboard.writeText(url).then(() => { ($('invite-copied') as HTMLElement).style.display = 'inline'; setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000); });
+      };
+    };
     ($('open-file-btn') as HTMLButtonElement).disabled = false;
     ($('save-file-btn') as HTMLButtonElement).disabled = false;
 

@@ -110,6 +110,10 @@ export class SignalingClient implements IceConfigProvider {
       // Track TTL from API response (default 3600s) to support refreshIfNeeded
       const ttlSeconds = data.ttl ?? 3600;
       this._iceConfigExpiry = Date.now() + ttlSeconds * 1000;
+      // Validate TURN: warn if relay response lacks TURN servers with credentials
+      if (!this.hasTurn) {
+        console.warn('[signaling] relay /turn-credentials returned no TURN servers with credentials — ICE will use STUN only');
+      }
     } catch {
       // Fallback if relay API is unavailable — STUN only, no TURN
       const config: RTCConfiguration = {
@@ -123,6 +127,7 @@ export class SignalingClient implements IceConfigProvider {
       this._iceConfig = this.applyIceMode(config);
       this._iceConfigSource = 'fallback';
       this._iceConfigExpiry = Date.now() + 5 * 60 * 1000; // finite: retry relay after 5 min
+      console.warn('[signaling] relay API unavailable — using STUN-only fallback (no TURN)');
     }
     return this._iceConfig;
   }
