@@ -75,6 +75,25 @@ export function createApplication() {
     ensureEditorVisible();
   }
 
+  function startEditorLocal() {
+    if (editorReady) return;
+    editorReady = true;
+    $('editor-section').style.display = 'flex';
+    setTextContent('topbar-role', '\u{1F4DD} Local mode');
+    chat.addLog('system', '\u{1F4DD} Editor ready \u2014 local mode');
+
+    feature.start({
+      isHost: () => isHost,
+      isConnected: () => p2pConnected,
+      sendFeatureData: (data) => session.sendFeature(data),
+      sendFeatureDataToPeer: (peerId, data) => session.sendFeatureDataToPeer(peerId, data),
+      sendControlMessage: (msg) => session.sendControl(msg),
+      reportStatus: (msg) => chat.addLog('system', msg),
+    });
+    // ponytail: no feature.onConnected() here — that fires on P2P connect
+  }
+
+  // pony tail: kept for safety — guard prevents double-init after startEditorLocal
   function ensureEditorVisible() {
     if (editorReady) return;
     editorReady = true;
@@ -83,7 +102,7 @@ export function createApplication() {
       ($('open-file-btn') as HTMLButtonElement).style.display = 'none';
       ($('sync-btn') as HTMLButtonElement).style.display = '';
     }
-    chat.addLog('system', '📝 Editor ready');
+    chat.addLog('system', '\u{1F4DD} Editor ready');
 
     feature.start({
       isHost: () => isHost,
@@ -130,7 +149,7 @@ export function createApplication() {
     chat.addLog('system', `📡 Connected — ${route}`);
     setTextContent('connection-route', route);
     setTextContent('connection-state', 'connected');
-    ensureEditorVisible();
+    feature.onConnected(); // ponytail: trigger peer sync (isHost guard makes it no-op for host)
   };
   session.onRoleChanged = (host, hostEmail) => {
     applyRoleState(host, hostEmail);
@@ -143,6 +162,9 @@ export function createApplication() {
   };
   
   session.getEmail = () => email;
+
+  // ── Start editor in local mode immediately ──
+  startEditorLocal();
 
   // ── Promote button ──
   participants.onPromote = async (targetEmail) => {
@@ -203,6 +225,7 @@ export function createApplication() {
     ($('email-input') as HTMLInputElement).disabled = true;
 
     const useRelay = await session.createRoom(email);
+    applyRoleState(true, email);
     ($('copy-invite-btn') as HTMLButtonElement).style.display = '';
     ($('copy-invite-btn') as HTMLButtonElement).onclick = () => {
       navigator.clipboard.writeText(session.shareUrl).then(() => { ($('invite-copied') as HTMLElement).style.display = 'inline'; setTimeout(() => ($('invite-copied') as HTMLElement).style.display = 'none', 2000); });

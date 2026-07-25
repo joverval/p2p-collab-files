@@ -38,6 +38,7 @@ export class SessionController {
   private _connectionState: ConnectionState = 'idle';
   private _permanentHandlersRegistered = false;
   private _isHost = false;
+  private _isLocal = true; // ponytail: local-first — editor starts before any room
   private _processedPromotionIds = new Set<string>();
   private _roomStateVersion = 0;
   private _lastRoomStateVersion = 0;
@@ -168,6 +169,7 @@ export class SessionController {
   get roomRef(): Room | null { return this.room; }
   get connectionState(): ConnectionState { return this._connectionState; }
   get isConnected(): boolean { return this._connectionState === 'connected'; }
+  get isLocal(): boolean { return this._isLocal; }
   get signalingListenerCount(): number { return this.signaling.listenerCount; }
   get localParticipantId(): string { return this._localParticipantId; }
   get hostParticipantId(): string { return this._hostParticipantId; }
@@ -175,6 +177,7 @@ export class SessionController {
   // ── Host: create room ──
   async createRoom(email: string): Promise<boolean> {
     this._isHost = true;
+    this._isLocal = false;
     this._hostEmail = email;
     this._hostParticipantId = 'host';
     this._localParticipantId = 'host';
@@ -381,6 +384,7 @@ export class SessionController {
   // ── Peer: join ──
   async peerAutoJoin(parsed: string, email: string): Promise<void> {
     this._isHost = false;
+    this._isLocal = false;
     this._localParticipantId = email;
     let useRelay = false, offerB64 = '';
     const isToken = !parsed.startsWith('manual:');
