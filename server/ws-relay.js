@@ -36,7 +36,7 @@ const DEFAULT_CANDIDATE_TIMEOUT = 30_000;  // 30s for candidate to respond
 const DEFAULT_HEARTBEAT_INTERVAL = 30_000;
 
 // Rate limit defaults (from ADR-S6)
-const DEFAULT_MAX_ROOMS_PER_IP = 10;
+const DEFAULT_MAX_ROOMS_PER_IP = 50;
 const DEFAULT_MAX_SOCKETS_PER_IP = 20;
 const DEFAULT_MAX_OFFERS_PER_MIN = 30;
 const DEFAULT_MAX_TURN_PER_MIN = 60;
