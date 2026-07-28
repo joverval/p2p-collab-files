@@ -381,8 +381,6 @@ export function createRelayServer(options = {}) {
 
       const iceServers = [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-        { urls: 'stun:stun.nextcloud.com:3478' },
       ];
 
       if (TURN_ENABLED) {
@@ -390,8 +388,11 @@ export function createRelayServer(options = {}) {
         const creds = generateTurnCredentials(TURN_SECRET, TURN_TTL);
         iceServers.push({
           urls: [
-            `turn:${TURN_HOST}:${TURN_PORT}?transport=udp`,
-            `turn:${TURN_HOST}:${TURN_PORT}?transport=tcp`,
+            `turn:${TURN_HOST}:3478?transport=udp`,
+            `turn:${TURN_HOST}:3478?transport=tcp`,
+            `turn:${TURN_HOST}:443?transport=udp`,
+            `turn:${TURN_HOST}:443?transport=tcp`,
+            `turns:${TURN_HOST}:5349?transport=tcp`,
           ],
           username: creds.username,
           credential: creds.password,
@@ -475,6 +476,8 @@ export function createRelayServer(options = {}) {
     wsMeta.set(ws, { lastPong: clock() });
     ws._pongMisses = 0;
 
+    logger.info(`[connect] new WS connection — IP hash:${logSafe(getRemoteIP(ws))} — total:${totalConnections}`);
+
     // Track socket per IP
     const wsIP = getRemoteIP(ws);
     ipTracker.trackSocket(wsIP, ws);
@@ -551,19 +554,20 @@ export function createRelayServer(options = {}) {
           room.participants.set(hostToken, { ws, email: normalizedEmail, participantId: room.hostParticipantId, role: 'host' });
           room.lastActivityAt = clock();
           respond(ws, { type: 'token', token: offerToken, roomId: room.roomId, offerId: msg.offerId }, requestId);
+          logger.info(`[connect] room ${room.roomId}: created by ${logSafe(normalizedEmail)} — total rooms:${rooms.size}`);
           break;
         }
 
         // ── fetch-offer ──
         case 'fetch-offer': {
           const tokenCheck = validateToken(msg.token);
-          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); logger.info(`[connect] fetch-offer rejected: invalid token`); return; }
           const info = tokenRoom.get(msg.token);
-          if (!info) { respond(ws, { type: 'error', message: 'Token not found or expired' }, requestId); return; }
+          if (!info) { respond(ws, { type: 'error', message: 'Token not found or expired' }, requestId); logger.info(`[connect] fetch-offer failed: token ${logSafe(msg.token)} not found or expired`); return; }
           const room = rooms.get(info.roomId);
-          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); logger.info(`[connect] fetch-offer failed: room ${info.roomId} not found`); return; }
           const offer = room.offers.get(msg.token);
-          if (!offer) { respond(ws, { type: 'error', message: 'Offer not found' }, requestId); return; }
+          if (!offer) { respond(ws, { type: 'error', message: 'Offer not found' }, requestId); logger.info(`[connect] fetch-offer failed: offer not found in room ${room.roomId}`); return; }
           // Reject replay of claimed / approved / expired tokens
           if (offer.status !== 'available') {
             // Narrow idempotent retry: same pending participant on same WS
@@ -577,17 +581,18 @@ export function createRelayServer(options = {}) {
           }
           room.lastActivityAt = clock();
           respond(ws, { type: 'offer', sdp: offer.sdp, offerId: offer.offerId, roomId: room.roomId }, requestId);
+          logger.info(`[connect] room ${room.roomId}: offer fetched successfully — token ${logSafe(msg.token)}`);
           break;
         }
 
         // ── submit-answer ──
         case 'submit-answer': {
           const tokenCheck = validateToken(msg.token);
-          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); return; }
+          if (!tokenCheck.ok) { respond(ws, { type: 'error', code: tokenCheck.error.code, message: tokenCheck.error.message }, requestId); logger.info(`[connect] submit-answer rejected: invalid token`); return; }
           const info = tokenRoom.get(msg.token);
-          if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); return; }
+          if (!info) { respond(ws, { type: 'error', message: 'Token not found' }, requestId); logger.info(`[connect] submit-answer failed: token ${logSafe(msg.token)} not found`); return; }
           const room = rooms.get(info.roomId);
-          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); return; }
+          if (!room) { respond(ws, { type: 'error', message: 'Room not found' }, requestId); logger.info(`[connect] submit-answer failed: room ${info.roomId} not found`); return; }
 
           // Atomically claim the offer before creating participant
           const offer = room.offers.get(msg.token);
@@ -678,6 +683,7 @@ export function createRelayServer(options = {}) {
           if (participant) participant.pendingRequestWs = undefined;
           room.lastActivityAt = clock();
           respond(ws, { type: 'host-approve-ack' }, requestId);
+          logger.info(`[connect] room ${room.roomId}: peer approved by host`);
           break;
         }
 
@@ -706,6 +712,7 @@ export function createRelayServer(options = {}) {
           }
           room.lastActivityAt = clock();
           respond(ws, { type: 'host-reject-ack' }, requestId);
+          logger.info(`[connect] room ${room.roomId}: peer rejected by host`);
           break;
         }
 
@@ -981,6 +988,7 @@ export function createRelayServer(options = {}) {
 
     ws.on('close', () => {
       totalDisconnections++;
+      logger.info(`[connect] WS disconnected — IP hash:${logSafe(getRemoteIP(ws))} — remaining:${wss.clients.size - 1} — disconnections:${totalDisconnections}`);
 
       for (const [roomId, room] of rooms) {
         const wasHost = room.hostWs === ws;
